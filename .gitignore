@@ -15,6 +15,8 @@ __pycache__/
 
 # Runtime logs
 logs/
+bot.log
+bridge.log
 
 # Frontend build artifacts (see frontend/.gitignore)
 frontend/node_modules/
