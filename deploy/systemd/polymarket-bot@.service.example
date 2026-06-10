@@ -1,0 +1,29 @@
+# systemd unit — 裸跑 bot 示例（多实例用 %i 区分）
+# 安装:
+#   sudo cp polymarket-bot@.service.example /etc/systemd/system/polymarket-bot@.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now polymarket-bot@bot-a
+#
+# 前置: /opt/polymarket-bot/deploy/instances/bot-a/ 下有 bot.env、build/trading-core、venv
+
+[Unit]
+Description=Polymarket C++ Bot (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket-bot
+EnvironmentFile=/opt/polymarket-bot/deploy/instances/%i/bot.env
+Environment=WS_HOST=0.0.0.0
+Environment=WS_PORT=8080
+ExecStart=/opt/polymarket-bot/.venv/bin/python3 dashboard_bridge.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/opt/polymarket-bot/deploy/instances/%i/logs/bridge.log
+StandardError=append:/opt/polymarket-bot/deploy/instances/%i/logs/bridge.log
+
+[Install]
+WantedBy=multi-user.target

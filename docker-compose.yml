@@ -1,0 +1,59 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ""
+        HTTPS_PROXY: ""
+        http_proxy: ""
+        https_proxy: ""
+    image: polymarket-cpp-bot:latest
+    container_name: polymarket-cpp-bot
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./logs:/app/logs
+    networks:
+      default:
+        aliases:
+          - bot
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ""
+        HTTPS_PROXY: ""
+        http_proxy: ""
+        https_proxy: ""
+    image: polymarket-cpp-frontend:latest
+    container_name: polymarket-cpp-frontend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: file:./prisma/data/dev.db
+      BOT_WS_URL: ws://bot:8080
+      NEXTAUTH_URL: http://127.0.0.1:3001
+      NEXTAUTH_SECRET: change-me-in-production
+      PORT: "3001"
+      HOSTNAME: 0.0.0.0
+      AUTH_TRUST_HOST: "true"
+    volumes:
+      - frontend-db:/app/prisma/data
+    depends_on:
+      bot:
+        condition: service_healthy
+
+volumes:
+  frontend-db:
+    external: true
+    name: c_frontend-db
+
+networks:
+  default:
+    name: polymarket-cpp-net

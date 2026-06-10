@@ -1,0 +1,21 @@
+import { Activity, ShieldAlert, SlidersHorizontal, History, FileText, LucideIcon } from "lucide-react";
+
+export interface NavItem {
+  name: string;
+  href: string;
+  icon: LucideIcon;
+  /** 未接 bot 的占位页，侧边栏显示「演示」标记 */
+  demo?: boolean;
+}
+
+export const navigation: NavItem[] = [
+  { name: "仪表盘", href: "/dashboard", icon: Activity },
+  { name: "交易历史", href: "/history", icon: History },
+  { name: "策略配置", href: "/strategies", icon: SlidersHorizontal, demo: true },
+  { name: "风控限额", href: "/risk", icon: ShieldAlert, demo: true },
+  { name: "审计日志", href: "/audit", icon: FileText, demo: true },
+];
+
+export function getNavTitle(pathname: string): string {
+  return navigation.find((item) => item.href === pathname)?.name ?? "仪表盘";
+}

@@ -1,0 +1,88 @@
+# 多实例部署 — 每个实例一套 bot + 前端，数据完全隔离
+#
+# 准备:
+#   cp -r deploy/instances/example deploy/instances/bot-a
+#   cp -r deploy/instances/example deploy/instances/bot-b
+#   编辑各目录下的 compose.env（端口）和 bot.env（策略/钱包）
+#
+# 构建镜像（只需一次）:
+#   docker compose -f docker-compose.yml build
+#
+# 启动实例 A（端口 8080 / 3001）:
+#   docker compose -p bot-a \
+#     --env-file deploy/instances/bot-a/compose.env \
+#     -f docker-compose.multi.yml up -d
+#
+# 启动实例 B（端口 8081 / 3002）:
+#   docker compose -p bot-b \
+#     --env-file deploy/instances/bot-b/compose.env \
+#     -f docker-compose.multi.yml up -d
+#
+# 注意:
+#   - `-p` 项目名决定网络/卷前缀，避免冲突
+#   - 实盘多开必须用不同 POLYMARKET_PRIVATE_KEY，否则同钱包重复下单
+#   - 纸面多开可用相同配置，但 PAPER_STARTING_BALANCE 各自独立（内存账本）
+
+name: ${INSTANCE_NAME:-polymarket}
+
+services:
+  bot:
+    image: polymarket-cpp-bot:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ""
+        HTTPS_PROXY: ""
+    restart: unless-stopped
+    ports:
+      - "${BOT_HTTP_PORT:-8080}:8080"
+    environment:
+      WS_PORT: "8080"
+    volumes:
+      - ${BOT_ENV_FILE:-./deploy/instances/example/bot.env}:/app/.env:ro
+      - ${BOT_LOG_DIR:-./deploy/instances/example/logs}:/app/logs
+    networks:
+      internal:
+        aliases:
+          - bot
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',8080)); s.close()"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  frontend:
+    image: polymarket-cpp-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ""
+        HTTPS_PROXY: ""
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_HTTP_PORT:-3001}:3001"
+    environment:
+      DATABASE_URL: file:./prisma/data/dev.db
+      BOT_WS_URL: ws://bot:8080
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://127.0.0.1:3001}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-change-me-in-production}
+      PORT: "3001"
+      HOSTNAME: 0.0.0.0
+      AUTH_TRUST_HOST: "true"
+    volumes:
+      - frontend-db:/app/prisma/data
+    depends_on:
+      bot:
+        condition: service_healthy
+    networks:
+      - internal
+
+volumes:
+  frontend-db:
+
+networks:
+  internal:
+    driver: bridge

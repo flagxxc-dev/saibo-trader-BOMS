@@ -1,0 +1,100 @@
+cmake_minimum_required(VERSION 3.15)
+project(trading-core CXX)
+
+# Require C++20
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Compiler flags for performance and strict warnings
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -flto -Wall -Wextra -Wpedantic -Wno-unused-parameter")
+endif()
+
+# Find dependencies provided by Conan
+find_package(Boost REQUIRED COMPONENTS system thread json)
+find_package(OpenSSL REQUIRED)
+find_package(spdlog REQUIRED)
+
+# Fetch libsecp256k1 for EIP-712 signing
+include(FetchContent)
+set(SECP256K1_ENABLE_MODULE_RECOVERY ON CACHE BOOL "" FORCE)
+set(SECP256K1_ENABLE_MODULE_EXTRAKEYS ON CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_EXHAUSTIVE_TESTS OFF CACHE BOOL "" FORCE)
+set(SECP256K1_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+  secp256k1
+  GIT_REPOSITORY https://github.com/bitcoin-core/secp256k1.git
+  GIT_TAG        v0.7.1
+)
+FetchContent_MakeAvailable(secp256k1)
+
+# Add source files
+set(SOURCES
+    src/main.cpp
+    src/state/StateStore.cpp
+    src/feeds/BinanceFeed.cpp
+    src/feeds/PolymarketFeed.cpp
+    src/feeds/GammaClient.cpp
+    src/model/FairValueModel.cpp
+    src/risk/RiskManager.cpp
+    src/exec/EIP712Signer.cpp
+    src/exec/OrderRouter.cpp
+    src/risk/KellySizer.cpp
+    src/signals/LatencyArbDetector.cpp
+    src/signals/DumpHedgeDetector.cpp
+)
+
+add_executable(trading-core ${SOURCES})
+
+# Include directories
+target_include_directories(trading-core PRIVATE src)
+
+# Disable spdlog internal exceptions to bypass Apple Clang 15 C++20 consteval bugs
+target_compile_definitions(trading-core PRIVATE SPDLOG_NO_EXCEPTIONS)
+
+# Link dependencies
+target_link_libraries(trading-core PRIVATE
+    Boost::headers
+    Boost::system
+    Boost::thread
+    Boost::json
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    spdlog::spdlog
+    secp256k1
+)
+
+# Test Executable for Phase 3
+add_executable(test_phase3
+    src/test_phase3.cpp
+    src/model/FairValueModel.cpp
+    src/risk/RiskManager.cpp
+)
+target_link_libraries(test_phase3 PRIVATE spdlog::spdlog)
+target_compile_definitions(test_phase3 PRIVATE SPDLOG_NO_EXCEPTIONS)
+
+# Test Executable for Phase 4
+add_executable(test_phase4
+    src/test_phase4.cpp
+    src/state/StateStore.cpp
+    src/model/FairValueModel.cpp
+    src/risk/RiskManager.cpp
+    src/risk/KellySizer.cpp
+    src/signals/LatencyArbDetector.cpp
+    src/signals/DumpHedgeDetector.cpp
+    src/exec/OrderRouter.cpp
+    src/exec/EIP712Signer.cpp
+)
+target_link_libraries(test_phase4 PRIVATE 
+    spdlog::spdlog 
+    fmt::fmt 
+    Boost::headers 
+    Boost::system
+    Boost::json
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    secp256k1
+)
+target_compile_definitions(test_phase4 PRIVATE SPDLOG_NO_EXCEPTIONS)

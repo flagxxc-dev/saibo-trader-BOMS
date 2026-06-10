@@ -1,0 +1,7 @@
+# Python runtime deps for bridge, key derivation, and balance fetch
+websockets>=12.0,<14.0
+rich>=13.7.0,<15.0.0
+python-dotenv>=1.0.0,<2.0.0
+py-clob-client>=0.34.0,<1.0.0
+requests>=2.31.0,<3.0.0
+eth-account>=0.10.0,<1.0.0

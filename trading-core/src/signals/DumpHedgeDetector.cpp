@@ -1,0 +1,102 @@
+#include "DumpHedgeDetector.h"
+#include <spdlog/spdlog.h>
+#include <fmt/core.h>
+
+namespace trading {
+
+DumpHedgeDetector::DumpHedgeDetector(StateStore& state_store, 
+                                     std::vector<MarketInfo> active_markets,
+                                     double sum_target,
+                                     double min_discount,
+                                     double min_seconds_remaining,
+                                     double cooldown_seconds)
+    : state_store_(state_store),
+      active_markets_(std::move(active_markets)),
+      sum_target_(sum_target),
+      min_discount_(min_discount),
+      min_seconds_remaining_(min_seconds_remaining),
+      cooldown_seconds_(cooldown_seconds)
+{
+    std::string msg = fmt::format("DumpHedgeDetector initialized | Markets: {} | SumTarget: {:.2f} | MinDiscount: {:.2f}",
+                                  active_markets_.size(), sum_target_, min_discount_);
+    spdlog::log(spdlog::level::info, msg);
+}
+
+std::optional<DumpHedgeSignal> DumpHedgeDetector::evaluate(double current_time_ms) {
+    evaluations_++;
+    std::optional<DumpHedgeSignal> best_signal;
+
+    for (const auto& market : active_markets_) {
+        // Check cooldown
+        if (last_signal_time_.contains(market.asset)) {
+            if ((current_time_ms - last_signal_time_[market.asset]) / 1000.0 < cooldown_seconds_) {
+                continue;
+            }
+        }
+
+        // Check time remaining
+        double seconds_remaining = market.end_date_ts - (current_time_ms / 1000.0);
+        if (seconds_remaining < min_seconds_remaining_) {
+            continue;
+        }
+
+        auto yes_price_opt = state_store_.get_token_price(market.yes_token_id);
+        auto no_price_opt = state_store_.get_token_price(market.no_token_id);
+
+        if (!yes_price_opt || !no_price_opt) {
+            continue;
+        }
+        
+        // Ensure both prices represent ASKs (which we can BUY from)
+        if (yes_price_opt->side != "BUY" || no_price_opt->side != "BUY") {
+            continue;
+        }
+
+        double yes_price = yes_price_opt->price;
+        double no_price = no_price_opt->price;
+
+        if (yes_price <= 0 || no_price <= 0) continue;
+
+        double combined = yes_price + no_price;
+        double entry_fees = combined * fee_rate_; 
+        double discount = 1.0 - combined - entry_fees;
+
+        if (combined > sum_target_) continue;
+        if (discount < min_discount_) continue;
+
+        DumpHedgeSignal signal{
+            .market = market,
+            .asset = market.asset,
+            .yes_token_id = market.yes_token_id,
+            .no_token_id = market.no_token_id,
+            .yes_price = yes_price,
+            .no_price = no_price,
+            .combined_price = combined,
+            .discount = discount,
+            .discount_pct = combined > 0 ? (discount / combined) : 0.0,
+            .seconds_remaining = seconds_remaining,
+            .timestamp = current_time_ms
+        };
+
+        if (!best_signal || signal.discount > best_signal->discount) {
+            best_signal = signal;
+        }
+    }
+
+    if (best_signal) {
+        last_signal_time_[best_signal->asset] = current_time_ms;
+        signals_generated_++;
+        std::string msg = fmt::format("DUMP-HEDGE DETECTED [#{}] | {} | YES: {:.3f} NO: {:.3f} | Sum: {:.3f} | Locked: {:.3f}/share",
+                                      signals_generated_, best_signal->asset, best_signal->yes_price, best_signal->no_price,
+                                      best_signal->combined_price, best_signal->discount);
+        spdlog::log(spdlog::level::info, msg);
+    }
+
+    return best_signal;
+}
+
+void DumpHedgeDetector::reset_cooldown(const std::string& asset, double current_time_ms) {
+    last_signal_time_[asset] = current_time_ms;
+}
+
+} // namespace trading
