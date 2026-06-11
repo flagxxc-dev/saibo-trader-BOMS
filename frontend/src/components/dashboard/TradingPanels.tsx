@@ -126,6 +126,7 @@ function LegRow({
 
 function PositionCard({ pos, feeRate }: { pos: OpenPosition; feeRate: number }) {
   const isDh = pos.strategy === "DH";
+  const windowMin = pos.windowMinutes ?? 5;
   const yesActive = isDh || pos.heldSide === "YES";
   const noActive = isDh || pos.heldSide === "NO";
 
@@ -135,9 +136,14 @@ function PositionCard({ pos, feeRate }: { pos: OpenPosition; feeRate: number }) 
         <div>
           <div className="flex items-center gap-2 mb-1">
             <span className="text-sm font-bold uppercase text-white">{pos.asset}</span>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${isDh ? "bg-purple-500/20 text-purple-300" : "bg-blue-500/20 text-blue-300"}`}>
-              {isDh ? "对冲套利" : "延迟套利"}
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                windowMin === 15 ? "bg-indigo-500/20 text-indigo-300" : "bg-purple-500/20 text-purple-300"
+              }`}
+            >
+              {windowMin}m
             </span>
+            {isDh && <span className="text-[10px] text-white/35">折价对冲</span>}
           </div>
           <p className="text-[11px] text-white/40 max-w-lg leading-relaxed">{pos.question}</p>
         </div>
@@ -209,7 +215,7 @@ export function TradingPanels({ liveState }: { liveState: LiveState }) {
               当前持仓
             </CardTitle>
             <span className="text-[11px] font-mono text-white/30">
-              {liveState.openPositions} 笔 · LA ${liveState.laPnl.toFixed(2)} · DH ${liveState.dhPnl.toFixed(2)}
+              {liveState.openPositions} 笔 · DH 已实现 ${liveState.dhPnl.toFixed(2)}
               · 费率 {(liveState.feeRate * 100).toFixed(1)}%
             </span>
           </div>

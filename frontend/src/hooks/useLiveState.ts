@@ -1,8 +1,10 @@
 import { useState, useEffect } from "react";
+import { inferWindowMinutes } from "@/lib/tradeWindow";
 
 export interface DHOpportunity {
   question: string;
   asset: string;
+  windowMinutes?: number;
   yesPrice: number;
   noPrice: number;
   combined: number;
@@ -37,6 +39,7 @@ export interface TradeRecord {
   endDateTs?: number;
   exitReason?: string;
   isPaperMode: boolean;
+  windowMinutes?: number;
 }
 
 export interface OpenPosition {
@@ -51,6 +54,7 @@ export interface OpenPosition {
   direction?: string;
   heldSide?: "YES" | "NO" | "BOTH";
   endDateTs?: number;
+  windowMinutes?: number;
   yesEntryPrice?: number;
   noEntryPrice?: number;
   yesLivePrice?: number;
@@ -148,6 +152,7 @@ function normalizeOpportunities(value: unknown): DHOpportunity[] {
     return {
       question: String(opp.question ?? ""),
       asset: String(opp.asset ?? ""),
+      windowMinutes: toNumber(opp.windowMinutes, 5) || 5,
       yesPrice,
       noPrice,
       combined,
@@ -167,6 +172,10 @@ function normalizePositions(value: unknown, opps: DHOpportunity[], feeRate: numb
     const strategy = String(p.strategy ?? "");
     const question = String(p.question ?? "");
     const asset = String(p.asset ?? "");
+    const windowMinutes = inferWindowMinutes(
+      question,
+      toNumber(p.windowMinutes) || undefined
+    );
     const entryPrice = toNumber(p.entryPrice);
     const size = toNumber(p.size);
     const cost = toNumber(p.cost);
@@ -217,6 +226,7 @@ function normalizePositions(value: unknown, opps: DHOpportunity[], feeRate: numb
       cost,
       strategy,
       question,
+      windowMinutes,
       pnl: toNumber(p.pnl),
       direction: String(p.direction ?? ""),
       heldSide,
@@ -239,12 +249,15 @@ function normalizeTradeHistory(value: unknown): TradeRecord[] {
   return value.map((item) => {
     const t = item as Record<string, unknown>;
     const strategy = String(t.strategy ?? "LA") as "LA" | "DH";
+    const market = String(t.market ?? "");
+    const windowMinutes = inferWindowMinutes(market, toNumber(t.windowMinutes) || undefined);
     return {
       id: String(t.id ?? ""),
       strategy: strategy === "DH" ? "DH" : "LA",
       asset: String(t.asset ?? ""),
+      windowMinutes,
       status: String(t.status ?? "closed") === "open" ? "open" : "closed",
-      market: String(t.market ?? ""),
+      market,
       side: String(t.side ?? ""),
       direction: String(t.direction ?? ""),
       entryPrice: toNumber(t.entryPrice),

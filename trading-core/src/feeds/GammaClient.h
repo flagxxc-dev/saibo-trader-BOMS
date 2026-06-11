@@ -12,7 +12,7 @@ namespace trading {
 class GammaClient {
 public:
     GammaClient(boost::asio::io_context& ioc, boost::asio::ssl::context& ctx);
-    std::vector<MarketInfo> fetch_updown_markets(const std::string& asset);
+    std::vector<MarketInfo> fetch_updown_markets(const std::string& asset, int window_minutes = 5);
 
     // REST price fallback — mirrors Python's get_market_price() REST path.
     // Hits GET clob.polymarket.com/price?token_id=...&side=BUY.
@@ -22,7 +22,7 @@ public:
 
 private:
     std::string http_get(const std::string& host, const std::string& target);
-    std::optional<MarketInfo> probe_slug(const std::string& asset, long long ts);
+    std::optional<MarketInfo> probe_slug(const std::string& asset, long long ts, int window_minutes);
 
     boost::asio::io_context& ioc_;
     boost::asio::ssl::context& ctx_;

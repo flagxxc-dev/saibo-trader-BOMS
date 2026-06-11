@@ -81,8 +81,10 @@ std::optional<double> GammaClient::fetch_binance_price(const std::string& symbol
     }
 }
 
-std::optional<MarketInfo> GammaClient::probe_slug(const std::string& asset, long long ts) {
-    std::string slug = asset + "-updown-5m-" + std::to_string(ts);
+std::optional<MarketInfo> GammaClient::probe_slug(const std::string& asset, long long ts, int window_minutes) {
+    if (window_minutes != 5 && window_minutes != 15) return std::nullopt;
+    std::string slug = asset + "-updown-" + std::to_string(window_minutes) + "m-" + std::to_string(ts);
+    const long long window_seconds = window_minutes * 60LL;
     std::string target = "/events?slug=" + slug;
 
     std::string body;
@@ -124,7 +126,7 @@ std::optional<MarketInfo> GammaClient::probe_slug(const std::string& asset, long
         double end_ts = static_cast<double>(timegm(&tm));
         double now_ts = static_cast<double>(std::time(nullptr));
         secs_remaining = end_ts - now_ts;
-        if (secs_remaining < -10 || secs_remaining > 600) return std::nullopt;
+        if (secs_remaining < -10 || secs_remaining > window_seconds * 2) return std::nullopt;
     }
 
     // Check liquidity
@@ -188,8 +190,9 @@ std::optional<MarketInfo> GammaClient::probe_slug(const std::string& asset, long
     info.no_token_id  = no_token;
     info.yes_price    = yes_price;
     info.no_price     = no_price;
-    info.asset        = asset;
-    info.end_date_iso = end_date;
+    info.asset         = asset;
+    info.window_minutes = window_minutes;
+    info.end_date_iso  = end_date;
 
     // Polymarket Up/Down markets are neg-risk markets — they require orders
     // signed against the NEG_RISK exchange address, not the CTF Exchange.
@@ -218,21 +221,23 @@ std::optional<MarketInfo> GammaClient::probe_slug(const std::string& asset, long
     return info;
 }
 
-std::vector<MarketInfo> GammaClient::fetch_updown_markets(const std::string& asset) {
+std::vector<MarketInfo> GammaClient::fetch_updown_markets(const std::string& asset, int window_minutes) {
     std::vector<MarketInfo> results;
     try {
+        if (window_minutes != 5 && window_minutes != 15) return results;
+
         std::string a_l = asset;
         std::transform(a_l.begin(), a_l.end(), a_l.begin(), ::tolower);
 
         long long now_ts = static_cast<long long>(std::time(nullptr));
-        long long window = 300; // 5 minutes
+        long long window = static_cast<long long>(window_minutes) * 60LL;
         long long base = (now_ts / window) * window;
 
         // Probe prev, current, next, next+1 windows — same as Python
         std::set<std::string> seen;
         for (int offset : {-1, 0, 1, 2}) {
             long long ts = base + offset * window;
-            auto result = probe_slug(a_l, ts);
+            auto result = probe_slug(a_l, ts, window_minutes);
             if (result && !seen.count(result->condition_id)) {
                 seen.insert(result->condition_id);
                 results.push_back(*result);
@@ -244,7 +249,8 @@ std::vector<MarketInfo> GammaClient::fetch_updown_markets(const std::string& ass
             return a.end_date_ts < b.end_date_ts;
         });
 
-        spdlog::info("GammaClient: Found {} active {} 5m markets via slug probe.", results.size(), asset);
+        spdlog::info("GammaClient: Found {} active {} {}m markets via slug probe.",
+                     results.size(), asset, window_minutes);
     } catch (const std::exception& e) {
         spdlog::error("GammaClient error for {}: {}", asset, e.what());
     }

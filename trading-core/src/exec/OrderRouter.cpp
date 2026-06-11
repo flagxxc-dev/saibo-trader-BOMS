@@ -199,9 +199,11 @@ void OrderRouter::submit_dump_hedge_order(const DumpHedgeSignal& signal, double 
         dh_pos.end_date_ts = signal.market.end_date_ts;
         dh_pos.paper_mode = true;
         dh_pos.is_neg_risk = is_neg_risk;
+        dh_pos.window_minutes = signal.market.window_minutes;
 
         risk_manager_.register_dh_open(dh_pos);
-        spdlog::info("[PAPER DH] OPENED | {} | Entry: {:.4f} | Locked Profit: ${:.2f}", signal.asset, signal.combined_price, dh_pos.locked_profit_usdc);
+        spdlog::info("[PAPER DH] OPENED | {} {}m | Entry: {:.4f} | Locked Profit: ${:.2f}",
+                     signal.asset, signal.market.window_minutes, signal.combined_price, dh_pos.locked_profit_usdc);
     } else {
         spdlog::info("[LIVE DH] Initiating atomic dual-leg submission for {}... (neg_risk={})", signal.asset, is_neg_risk);
 
@@ -259,9 +261,11 @@ void OrderRouter::submit_dump_hedge_order(const DumpHedgeSignal& signal, double 
         dh_pos.end_date_ts = signal.market.end_date_ts;
         dh_pos.paper_mode = false;
         dh_pos.is_neg_risk = is_neg_risk;
+        dh_pos.window_minutes = signal.market.window_minutes;
 
         risk_manager_.register_dh_open(dh_pos);
-        spdlog::info("[LIVE DH] REGISTERED | {} | Total Cost: ${:.2f}", signal.asset, dh_pos.combined_cost_usdc);
+        spdlog::info("[LIVE DH] REGISTERED | {} {}m | Total Cost: ${:.2f}",
+                     signal.asset, signal.market.window_minutes, dh_pos.combined_cost_usdc);
     }
 }
 

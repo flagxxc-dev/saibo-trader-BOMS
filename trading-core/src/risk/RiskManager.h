@@ -8,6 +8,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <boost/json.hpp>
 
 namespace risk {
 
@@ -64,6 +65,7 @@ struct DumpHedgePosition {
     std::optional<double> pnl_usdc;
     std::string exit_reason;
     bool is_neg_risk = false; // true for Polymarket Up/Down (neg-risk) markets
+    int window_minutes = 5;   // 5 or 15 — Polymarket up/down series
 };
 
 class RiskManager {
@@ -141,6 +143,10 @@ public:
     void pause(const std::string& reason = "Manual pause");
     bool resume();
     bool reset_kill_switch(bool confirm = false);
+
+    // Paper mode persistence (JSON snapshot)
+    boost::json::object export_paper_state() const;
+    bool import_paper_state(const boost::json::object& doc);
 
 private:
     void check_risk_thresholds();

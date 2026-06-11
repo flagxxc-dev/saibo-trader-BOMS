@@ -19,12 +19,14 @@ RUN pip install --no-cache-dir conan==2.3.2
 
 WORKDIR /src
 COPY trading-core/conanfile.txt trading-core/CMakeLists.txt ./trading-core/
-COPY trading-core/src ./trading-core/src
 
 WORKDIR /src/trading-core
+# Split layers: Conan deps (slow download/build) cached unless conanfile changes.
 RUN conan profile detect --force \
- && conan install . --output-folder=build --build=missing -s compiler.cppstd=20 \
- && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
+ && conan install . --output-folder=build --build=missing -s compiler.cppstd=20
+
+COPY trading-core/src ./src
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
  && cmake --build build --target trading-core -j$(nproc)
 
 # ── Runtime ──────────────────────────────────────────────────────────────────

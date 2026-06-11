@@ -244,6 +244,7 @@ std::string StateStore::get_dashboard_json() const {
             po["size"] = p.size_shares;
             po["cost"] = p.combined_cost_usdc;
             po["strategy"] = "DH";
+            po["windowMinutes"] = p.window_minutes;
             po["question"] = p.market_question.c_str();
             po["endDateTs"] = p.end_date_ts;
             po["heldSide"] = "BOTH";
@@ -317,6 +318,7 @@ std::string StateStore::get_dashboard_json() const {
             h["closedAt"] = p.closed_at.value_or(0.0);
             h["exitReason"] = p.exit_reason.c_str();
             h["isPaperMode"] = p.paper_mode;
+            h["windowMinutes"] = p.window_minutes;
             push_hist({p.closed_at.value_or(p.opened_at), std::move(h)});
         }
 
@@ -369,6 +371,7 @@ std::string StateStore::get_dashboard_json() const {
             h["endDateTs"] = p.end_date_ts;
             h["exitReason"] = "";
             h["isPaperMode"] = p.paper_mode;
+            h["windowMinutes"] = p.window_minutes;
             push_hist({p.opened_at, std::move(h)});
         }
 
@@ -406,6 +409,7 @@ std::string StateStore::get_dashboard_json() const {
         for (const auto& m : markets_snapshot) {
             boost::json::object mo;
             mo["asset"] = m.asset.c_str();
+            mo["windowMinutes"] = m.window_minutes;
             mo["question"] = m.question.c_str();
             auto it_y = tokens_snapshot.find(m.yes_token_id);
             auto it_n = tokens_snapshot.find(m.no_token_id);

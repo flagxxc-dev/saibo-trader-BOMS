@@ -18,6 +18,7 @@
 #include "signals/LatencyArbDetector.h"
 #include "signals/DumpHedgeDetector.h"
 #include "exec/OrderRouter.h"
+#include "state/PaperStateStore.h"
 #include <spdlog/sinks/basic_file_sink.h>
 #include <fmt/core.h>
 #include <atomic>
@@ -403,6 +404,27 @@ int main() {
         }
         risk::RiskManager risk_manager(starting_balance, max_pos, daily_loss, drawdown, max_concurrent, true, 3, 5, 0.02, 300.0, min_order);
         risk_manager.set_fee_rate(fee_rate);
+
+        bool paper_state_persist = true;
+        if (env.count("PAPER_STATE_PERSIST")) {
+            std::string ps = env["PAPER_STATE_PERSIST"];
+            std::transform(ps.begin(), ps.end(), ps.begin(), ::tolower);
+            paper_state_persist = !(ps == "false" || ps == "0" || ps == "no" || ps == "off");
+        }
+        std::string paper_state_path = env.count("PAPER_STATE_PATH") ? env["PAPER_STATE_PATH"] : "logs/paper_state.json";
+
+        if (paper_mode && paper_state_persist) {
+            if (persistence::load_paper_state(risk_manager, paper_state_path)) {
+                spdlog::info("Paper session resumed | Balance: ${:.2f} | Open: {} | DH trades: {}",
+                    risk_manager.get_current_balance(),
+                    risk_manager.get_open_position_count(),
+                    risk_manager.get_total_dh_trades());
+                store.push_telemetry(fmt::format("PAPER STATE RESTORED | ${:.2f}", risk_manager.get_current_balance()));
+            } else {
+                spdlog::info("Paper state: fresh session (no snapshot at {})", paper_state_path);
+            }
+        }
+
         store.set_risk_manager(&risk_manager);
         store.set_fee_rate(fee_rate);
         store.set_strategy(strategy);
@@ -510,24 +532,35 @@ int main() {
                 // (called from Binance feed threads) uses gamma_ioc for synchronous HTTP.
                 // restart() while those ops are in flight is undefined behaviour.
                 std::vector<MarketInfo> all_m;
-                auto b = gamma.fetch_updown_markets("btc");
-                auto e = gamma.fetch_updown_markets("eth");
-                auto s = gamma.fetch_updown_markets("sol");
-                all_m.insert(all_m.end(), b.begin(), b.end());
-                all_m.insert(all_m.end(), e.begin(), e.end());
-                all_m.insert(all_m.end(), s.begin(), s.end());
+                auto b5 = gamma.fetch_updown_markets("btc", 5);
+                auto e5 = gamma.fetch_updown_markets("eth", 5);
+                auto s5 = gamma.fetch_updown_markets("sol", 5);
+                auto b15 = gamma.fetch_updown_markets("btc", 15);
+                auto e15 = gamma.fetch_updown_markets("eth", 15);
+                all_m.insert(all_m.end(), b5.begin(), b5.end());
+                all_m.insert(all_m.end(), e5.begin(), e5.end());
+                all_m.insert(all_m.end(), s5.begin(), s5.end());
+                all_m.insert(all_m.end(), b15.begin(), b15.end());
+                all_m.insert(all_m.end(), e15.begin(), e15.end());
+
+                std::vector<MarketInfo> la_m;
+                for (const auto& m : all_m) {
+                    if (m.window_minutes == 5) la_m.push_back(m);
+                }
+
                 store.update_markets(all_m);
                 {
                     std::lock_guard<std::mutex> lock(detector_mutex);
                     if (use_la) {
                         for (auto& det : la_detectors) {
-                            det->set_active_markets(all_m);
+                            det->set_active_markets(la_m);
                             det->set_entry_price_range(entry_price_min, entry_price_max);
                             det->set_min_fair_value_strength(la_fair_strength);
                             det->set_fee_rate(fee_rate);
                         }
                     }
                     if (use_dh) {
+                        // DH trades 5m (btc/eth/sol) + 15m (btc/eth) — all discovered markets
                         dh_detector = std::make_unique<DumpHedgeDetector>(store, all_m, dh_sum_target, dh_min_discount, dh_min_secs, dh_cooldown);
                         dh_detector->set_fee_rate(fee_rate);
                     }
@@ -598,6 +631,7 @@ int main() {
 
         auto last_binance_rest = std::chrono::system_clock::now() - std::chrono::seconds(10);
         bool rest_fallback_logged = false;
+        auto last_paper_save = std::chrono::system_clock::now();
 
         while (true) {
             auto loop_start = std::chrono::system_clock::now();
@@ -619,6 +653,10 @@ int main() {
             }
             risk_manager.is_trading_allowed(); // Trigger resume checks even if no signals fire
             check_and_close_positions(risk_manager, store, router, exit_cfg);
+            if (paper_mode && paper_state_persist && loop_start - last_paper_save > std::chrono::seconds(10)) {
+                last_paper_save = loop_start;
+                persistence::save_paper_state(risk_manager, paper_state_path);
+            }
             std::cout << store.get_dashboard_json() << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }

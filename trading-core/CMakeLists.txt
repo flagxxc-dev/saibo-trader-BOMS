@@ -34,6 +34,7 @@ FetchContent_MakeAvailable(secp256k1)
 set(SOURCES
     src/main.cpp
     src/state/StateStore.cpp
+    src/state/PaperStateStore.cpp
     src/feeds/BinanceFeed.cpp
     src/feeds/PolymarketFeed.cpp
     src/feeds/GammaClient.cpp

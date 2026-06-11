@@ -4,6 +4,10 @@
 
 namespace trading {
 
+static std::string dh_market_key(const MarketInfo& market) {
+    return market.asset + "-" + std::to_string(market.window_minutes) + "m";
+}
+
 DumpHedgeDetector::DumpHedgeDetector(StateStore& state_store, 
                                      std::vector<MarketInfo> active_markets,
                                      double sum_target,
@@ -27,9 +31,9 @@ std::optional<DumpHedgeSignal> DumpHedgeDetector::evaluate(double current_time_m
     std::optional<DumpHedgeSignal> best_signal;
 
     for (const auto& market : active_markets_) {
-        // Check cooldown
-        if (last_signal_time_.contains(market.asset)) {
-            if ((current_time_ms - last_signal_time_[market.asset]) / 1000.0 < cooldown_seconds_) {
+        const std::string market_key = dh_market_key(market);
+        if (last_signal_time_.contains(market_key)) {
+            if ((current_time_ms - last_signal_time_.at(market_key)) / 1000.0 < cooldown_seconds_) {
                 continue;
             }
         }
@@ -84,10 +88,11 @@ std::optional<DumpHedgeSignal> DumpHedgeDetector::evaluate(double current_time_m
     }
 
     if (best_signal) {
-        last_signal_time_[best_signal->asset] = current_time_ms;
+        last_signal_time_[dh_market_key(best_signal->market)] = current_time_ms;
         signals_generated_++;
-        std::string msg = fmt::format("DUMP-HEDGE DETECTED [#{}] | {} | YES: {:.3f} NO: {:.3f} | Sum: {:.3f} | Locked: {:.3f}/share",
-                                      signals_generated_, best_signal->asset, best_signal->yes_price, best_signal->no_price,
+        std::string msg = fmt::format("DUMP-HEDGE DETECTED [#{}] | {} {}m | YES: {:.3f} NO: {:.3f} | Sum: {:.3f} | Locked: {:.3f}/share",
+                                      signals_generated_, best_signal->asset, best_signal->market.window_minutes,
+                                      best_signal->yes_price, best_signal->no_price,
                                       best_signal->combined_price, best_signal->discount);
         spdlog::log(spdlog::level::info, msg);
     }

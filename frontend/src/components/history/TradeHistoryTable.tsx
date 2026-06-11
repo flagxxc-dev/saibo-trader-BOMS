@@ -1,6 +1,7 @@
 "use client";
 
 import type { TradeRecord } from "@/hooks/useLiveState";
+import { isHedgeTrade, resolveTradeWindow, tradeWindowLabel } from "@/lib/tradeWindow";
 
 function fmtTime(ts: number): string {
   if (!ts || ts <= 0) return "—";
@@ -17,8 +18,10 @@ function fmtUsd(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
-function strategyLabel(s: string): string {
-  return s === "DH" ? "折价对冲" : "延迟套利";
+function windowBadgeClass(minutes: number): string {
+  return minutes === 15
+    ? "bg-indigo-500/20 text-indigo-300"
+    : "bg-purple-500/20 text-purple-300";
 }
 
 export function TradeHistoryTable({ records, emptyText }: { records: TradeRecord[]; emptyText?: string }) {
@@ -37,7 +40,7 @@ export function TradeHistoryTable({ records, emptyText }: { records: TradeRecord
           <tr>
             <th className="px-3 py-2.5">时间</th>
             <th className="px-3 py-2.5">模式</th>
-            <th className="px-3 py-2.5">策略</th>
+            <th className="px-3 py-2.5">窗口</th>
             <th className="px-3 py-2.5">标的</th>
             <th className="px-3 py-2.5">市场</th>
             <th className="px-3 py-2.5 text-right">入场价</th>
@@ -54,12 +57,14 @@ export function TradeHistoryTable({ records, emptyText }: { records: TradeRecord
             const isOpen = r.status === "open";
             const pnlPositive = r.pnlUsdc >= 0;
             const totalFee = r.entryFee + r.exitFee;
+            const windowMin = resolveTradeWindow(r.market, r.windowMinutes);
+            const hedge = isHedgeTrade(r.strategy) || (r.yesEntryPrice != null && r.noEntryPrice != null);
             const entryDetail =
-              r.strategy === "DH" && r.yesEntryPrice && r.noEntryPrice
+              hedge && r.yesEntryPrice && r.noEntryPrice
                 ? `Y${r.yesEntryPrice.toFixed(3)}/N${r.noEntryPrice.toFixed(3)}`
                 : r.entryPrice.toFixed(4);
             const exitDetail =
-              r.strategy === "DH" && r.yesExitPrice != null && r.noExitPrice != null && !isOpen
+              hedge && r.yesExitPrice != null && r.noExitPrice != null && !isOpen
                 ? `Y${r.yesExitPrice.toFixed(3)}/N${r.noExitPrice.toFixed(3)}`
                 : r.exitPrice != null && r.exitPrice > 0
                   ? r.exitPrice.toFixed(4)
@@ -81,13 +86,13 @@ export function TradeHistoryTable({ records, emptyText }: { records: TradeRecord
                 </td>
                 <td className="px-3 py-2.5">
                   <span
-                    className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${
-                      r.strategy === "DH" ? "bg-purple-500/20 text-purple-300" : "bg-blue-500/20 text-blue-300"
-                    }`}
+                    className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${windowBadgeClass(windowMin)}`}
                   >
-                    {r.strategy}
+                    {tradeWindowLabel(windowMin)}
                   </span>
-                  <span className="text-white/30 ml-1 text-[10px]">{strategyLabel(r.strategy)}</span>
+                  <span className="text-white/30 ml-1 text-[10px]">
+                    {hedge ? "折价对冲" : "延迟套利"}
+                  </span>
                 </td>
                 <td className="px-3 py-2.5 text-white/80 uppercase font-bold">{r.asset}</td>
                 <td className="px-3 py-2.5 text-white/45 max-w-[200px] truncate" title={r.market}>
