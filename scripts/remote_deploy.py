@@ -151,7 +151,8 @@ def main() -> int:
 
         if mode == "deploy":
             proj = PROJ
-            if not run(client, f"test -d '{proj}/.git' && echo ok", timeout=15):
+            _, stdout, _ = client.exec_command(f"test -d '{proj}/.git' && echo ok", timeout=15)
+            if "ok" not in stdout.read().decode():
                 print(f"ERROR: {proj} missing — run: python scripts/remote_deploy.py setup", file=sys.stderr)
                 return 1
             bot_sh = ROOT / "scripts" / "server_start_bot.sh"
