@@ -37,6 +37,7 @@ private:
     double fee_rate_ = 0.018;
 
     std::unordered_map<std::string, double> last_signal_time_;
+    double last_near_miss_log_sec_ = 0.0;
     int evaluations_ = 0;
     int signals_generated_ = 0;
 };
