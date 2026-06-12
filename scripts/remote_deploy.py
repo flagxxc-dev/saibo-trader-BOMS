@@ -155,6 +155,39 @@ def main() -> int:
                 run(client, step, timeout=300)
             return 0
 
+        if mode == "sync-env":
+            local_env = ROOT / ".env"
+            if not local_env.is_file():
+                print(f"ERROR: missing {local_env}", file=sys.stderr)
+                return 1
+            remote_env = f"{PROJ}/.env"
+            sftp = client.open_sftp()
+            try:
+                sftp.rename(remote_env, f"{remote_env}.bak")
+            except OSError:
+                pass
+            sftp.put(str(local_env), remote_env)
+            sftp.close()
+            keys = [
+                line.split("=", 1)[0].strip()
+                for line in local_env.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.strip().startswith("#") and "=" in line
+            ]
+            print(f"Uploaded .env ({len(keys)} keys)", file=sys.stderr)
+            bot_sh = ROOT / "scripts" / "server_start_bot.sh"
+            remote_bot = f"{PROJ}/server_start_bot.sh"
+            sftp = client.open_sftp()
+            sftp.put(str(bot_sh), remote_bot)
+            sftp.close()
+            run(client, f"chmod +x '{remote_bot}' && bash '{remote_bot}'", timeout=120)
+            run(
+                client,
+                f"grep -E '^(PAPER_MODE|DH_SUM_TARGET|DH_MIN_DISCOUNT|RISK_)' '{remote_env}' | head -10",
+                timeout=30,
+            )
+            run(client, "pgrep -af 'start_bot|trading-core' || true", timeout=15)
+            return 0
+
         if mode == "set-auth":
             user = sys.argv[2] if len(sys.argv) > 2 else "zhan"
             password = sys.argv[3] if len(sys.argv) > 3 else "qilai"
