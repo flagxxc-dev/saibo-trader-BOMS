@@ -130,6 +130,15 @@ def main() -> int:
                 run(client, step, timeout=180)
             return 0
 
+        if mode == "disable-mongo":
+            script = ROOT / "scripts" / "server_disable_mongo.sh"
+            remote = f"{PROJ}/server_disable_mongo.sh"
+            sftp = client.open_sftp()
+            sftp.put(str(script), remote)
+            sftp.close()
+            run(client, f"chmod +x '{remote}' && bash '{remote}'", timeout=120)
+            return 0
+
         if mode == "cleanup":
             cleanup_sh = ROOT / "scripts" / "server_disk_cleanup.sh"
             remote = f"{PROJ}/server_disk_cleanup.sh"

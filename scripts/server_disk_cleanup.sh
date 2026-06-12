@@ -10,6 +10,7 @@ if systemctl is-active mongod &>/dev/null; then
   systemctl stop mongod || true
 fi
 systemctl disable mongod 2>/dev/null || true
+systemctl mask mongod 2>/dev/null || true
 rm -rf /var/log/mongodb/*
 # Optional: drop mongo data if polycopy is retired (frees ~1.4G)
 if [ "${PURGE_MONGO_DATA:-0}" = "1" ]; then
