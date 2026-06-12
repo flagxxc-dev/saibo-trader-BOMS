@@ -13,7 +13,16 @@ ENV_PATH = Path(os.getenv("ENV_PATH", ".env"))
 AUDIT_PATH = Path(os.getenv("AUDIT_PATH", "logs/audit.jsonl"))
 RUNTIME_CONFIG_PATH = Path(os.getenv("RUNTIME_CONFIG_PATH", "logs/runtime_config.json"))
 
-BOOL_KEYS = frozenset({"BINANCE_FEED_ENABLED", "DH_ENABLE_5M", "DH_ENABLE_15M"})
+BOOL_KEYS = frozenset({
+    "BINANCE_FEED_ENABLED",
+    "DH_ENABLE_5M",
+    "DH_ENABLE_15M",
+    "DH_ENABLE_5M_BTC",
+    "DH_ENABLE_5M_ETH",
+    "DH_ENABLE_5M_SOL",
+    "DH_ENABLE_15M_BTC",
+    "DH_ENABLE_15M_ETH",
+})
 
 ALLOWED_KEYS = {
     "DH_SUM_TARGET",
@@ -22,6 +31,11 @@ ALLOWED_KEYS = {
     "DH_MIN_SECONDS_REMAINING",
     "DH_ENABLE_5M",
     "DH_ENABLE_15M",
+    "DH_ENABLE_5M_BTC",
+    "DH_ENABLE_5M_ETH",
+    "DH_ENABLE_5M_SOL",
+    "DH_ENABLE_15M_BTC",
+    "DH_ENABLE_15M_ETH",
     "RISK_MAX_POSITION_FRACTION",
     "RISK_DAILY_LOSS_LIMIT",
     "RISK_TOTAL_DRAWDOWN_KILL",

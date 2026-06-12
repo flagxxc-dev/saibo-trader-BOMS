@@ -7,6 +7,7 @@ import { GlassCard, CardContent, CardHeader, CardTitle } from "@/components/shar
 import { BinancePriceChart } from "@/components/dashboard/BinancePriceChart";
 import { PmMarketPanel } from "@/components/dashboard/PmMarketPanel";
 import { TradingPanels } from "@/components/dashboard/TradingPanels";
+import { PreflightBanner } from "@/components/dashboard/PreflightBanner";
 import { useLiveState } from "@/hooks/useLiveState";
 import { coreStatusLabel } from "@/lib/coreStatus";
 import { Activity, DollarSign, Briefcase, Percent, TrendingUp } from "lucide-react";
@@ -32,10 +33,13 @@ export default function DashboardPage() {
           icon={Activity}
         />
 
+        <PreflightBanner />
+
         {liveState.isPaperMode && (
           <div className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-4 py-2.5 text-[13px] text-amber-100/90">
-            📋 <strong>纸面交易模式</strong> — 以下为纸面数据，不会动用真实资金。策略信号已扣除约{" "}
-            {(liveState.feeRate * 100).toFixed(1)}% 手续费边际，开仓/平仓时从余额扣减 taker 费。
+            📋 <strong>纸面交易模式</strong> — 以下为纸面数据，不会动用真实资金。策略信号已按
+            {liveState.useDynamicFees ? " Polymarket V2 动态费率曲线" : ` 约 ${(liveState.feeRate * 100).toFixed(1)}% 扁平费率`}
+            扣除手续费边际，开仓/平仓时从余额扣减 taker 费。
           </div>
         )}
 

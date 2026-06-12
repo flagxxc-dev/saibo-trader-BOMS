@@ -13,6 +13,7 @@
 #include <chrono>
 #include <random>
 #include <cmath>
+#include <thread>
 
 namespace trading {
 namespace exec {
@@ -219,7 +220,9 @@ bool OrderRouter::submit_dump_hedge_order(const DumpHedgeSignal& signal, double 
         dh_pos.combined_entry_price = signal.combined_price;
         dh_pos.size_shares = size_shares;
         dh_pos.combined_cost_usdc = signal.combined_price * size_shares;
-        double entry_fees = dh_pos.combined_cost_usdc * risk_manager_.get_fee_rate();
+        double fee_per_share = store_.compute_dh_entry_fee_per_share(
+            signal.yes_price, signal.no_price, signal.yes_token_id, signal.no_token_id);
+        double entry_fees = fee_per_share * size_shares;
         dh_pos.locked_profit_usdc = (1.0 - signal.combined_price) * size_shares - entry_fees;
         dh_pos.opened_at = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
         dh_pos.end_date_ts = signal.market.end_date_ts;
@@ -267,7 +270,9 @@ bool OrderRouter::submit_dump_hedge_order(const DumpHedgeSignal& signal, double 
     double filled_shares = std::min(yes_fill.size_shares, no_fill.size_shares);
     double combined_price = yes_fill.price + no_fill.price;
     double combined_cost = yes_fill.price * filled_shares + no_fill.price * filled_shares;
-    double entry_fees = combined_cost * risk_manager_.get_fee_rate();
+    double fee_per_share = store_.compute_dh_entry_fee_per_share(
+        yes_fill.price, no_fill.price, signal.yes_token_id, signal.no_token_id);
+    double entry_fees = fee_per_share * filled_shares;
     double locked_profit = (1.0 - combined_price) * filled_shares - entry_fees;
 
     risk::DumpHedgePosition dh_pos;
@@ -446,6 +451,25 @@ LegFillResult OrderRouter::execute_rest_order(
         auto response_json = boost::json::parse(res.body()).as_object();
         spdlog::info("[LIVE EXEC] Response: {}", res.body());
 
+        const bool success = !response_json.contains("success") || response_json.at("success").as_bool();
+        std::string error_msg;
+        if (response_json.contains("errorMsg") && response_json.at("errorMsg").is_string()) {
+            error_msg = std::string(response_json.at("errorMsg").as_string());
+        }
+        if (!success || !error_msg.empty()) {
+            spdlog::error("[LIVE EXEC] Order rejected by CLOB: {}", error_msg.empty() ? "success=false" : error_msg);
+            return result;
+        }
+
+        std::string status;
+        if (response_json.contains("status") && response_json.at("status").is_string()) {
+            status = std::string(response_json.at("status").as_string());
+        }
+        if (status == "unmatched") {
+            spdlog::warn("[LIVE EXEC] FAK unmatched — no liquidity");
+            return result;
+        }
+
         double actual_price = target_price;
         double filled_size = 0.0;
 
@@ -453,13 +477,28 @@ LegFillResult OrderRouter::execute_rest_order(
             actual_price = std::stod(std::string(response_json["price"].as_string()));
         }
         if (response_json.contains("size_matched")) {
-            filled_size = std::stod(std::string(response_json["size_matched"].as_string())) / 1000000.0;
-        } else if (response_json.contains("status") && response_json["status"].as_string() == "filled") {
+            filled_size = parse_matched_size(response_json.at("size_matched"));
+        } else if (response_json.contains("sizeMatched")) {
+            filled_size = parse_matched_size(response_json.at("sizeMatched"));
+        } else if (status == "matched" || status == "filled") {
             filled_size = size_shares;
         }
 
+        const std::string order_id = extract_order_id(response_json);
+        if (!order_id.empty()) {
+            auto polled = poll_order_fill(order_id, actual_price, size_shares);
+            if (polled.ok) {
+                if (polled.price > 0.0) actual_price = polled.price;
+                if (polled.size_shares > 0.0) filled_size = polled.size_shares;
+                if (polled.status == "unmatched" || polled.status == "cancelled") {
+                    spdlog::warn("[LIVE EXEC] Order {} terminal status={} after poll", order_id.substr(0, 16), polled.status);
+                    return result;
+                }
+            }
+        }
+
         if (filled_size <= 0) {
-            spdlog::warn("[LIVE EXEC] 0 size matched");
+            spdlog::warn("[LIVE EXEC] 0 size matched after poll");
             return result;
         }
 
@@ -498,6 +537,121 @@ LegFillResult OrderRouter::execute_rest_order(
         spdlog::error("[LIVE EXEC] Network error: {}", e.what());
         return result;
     }
+}
+
+double OrderRouter::parse_matched_size(const boost::json::value& raw) const {
+    double sm = 0.0;
+    if (raw.is_string()) sm = std::stod(std::string(raw.as_string()));
+    else if (raw.is_double()) sm = raw.as_double();
+    else if (raw.is_int64()) sm = static_cast<double>(raw.as_int64());
+    else if (raw.is_uint64()) sm = static_cast<double>(raw.as_uint64());
+    if (sm > 1000.0) sm /= 1000000.0;
+    return sm;
+}
+
+std::string OrderRouter::extract_order_id(const boost::json::object& obj) const {
+    auto pick = [&](const char* key) -> std::string {
+        if (!obj.contains(key)) return "";
+        const auto& v = obj.at(key);
+        if (v.is_string()) return std::string(v.as_string());
+        return "";
+    };
+    std::string id = pick("orderID");
+    if (id.empty()) id = pick("orderId");
+    if (id.empty()) id = pick("id");
+    return id;
+}
+
+std::string OrderRouter::authenticated_http_get(const std::string& target) {
+    namespace beast = boost::beast;
+    namespace http = beast::http;
+
+    std::lock_guard<std::mutex> lock(http_mutex_);
+
+    const std::string host = "clob.polymarket.com";
+    boost::asio::ip::tcp::resolver resolver(ioc_);
+    beast::ssl_stream<beast::tcp_stream> stream(ioc_, ctx_);
+
+    if (!SSL_set_tlsext_host_name(stream.native_handle(), host.c_str())) {
+        throw std::runtime_error("Failed to set SNI hostname");
+    }
+
+    auto const results = resolver.resolve(host, "443");
+    beast::get_lowest_layer(stream).connect(results);
+    stream.handshake(boost::asio::ssl::stream_base::client);
+
+    http::request<http::string_body> req{http::verb::get, target, 11};
+    req.set(http::field::host, host);
+    req.set(http::field::user_agent, "PolymarketBot/1.0");
+    if (!api_key_.empty()) {
+        const std::string timestamp = std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const std::string signature = compute_hmac_signature(timestamp, "GET", target, "");
+        req.set("POLY_API_KEY", api_key_);
+        req.set("POLY_PASSPHRASE", api_passphrase_);
+        req.set("POLY_TIMESTAMP", timestamp);
+        req.set("POLY_SIGNATURE", signature);
+        req.set("POLY_ADDRESS", signer_address_);
+    }
+
+    http::write(stream, req);
+    beast::flat_buffer buffer;
+    http::response<http::string_body> res;
+    http::read(stream, buffer, res);
+    beast::error_code ec;
+    stream.shutdown(ec);
+
+    if (res.result() != http::status::ok) {
+        throw std::runtime_error("GET " + target + " HTTP " + std::to_string(res.result_int()));
+    }
+    return res.body();
+}
+
+OrderRouter::PolledFill OrderRouter::poll_order_fill(
+    const std::string& order_id, double fallback_price, double requested_shares)
+{
+    PolledFill out;
+    out.price = fallback_price;
+
+    constexpr int kMaxAttempts = 5;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        if (attempt > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+        try {
+            const std::string body = authenticated_http_get("/order/" + order_id);
+            const auto obj = boost::json::parse(body).as_object();
+
+            if (obj.contains("status") && obj.at("status").is_string()) {
+                out.status = std::string(obj.at("status").as_string());
+            }
+            if (obj.contains("price")) {
+                const auto& pv = obj.at("price");
+                if (pv.is_string()) out.price = std::stod(std::string(pv.as_string()));
+                else if (pv.is_double()) out.price = pv.as_double();
+            }
+            if (obj.contains("size_matched")) {
+                out.size_shares = parse_matched_size(obj.at("size_matched"));
+            } else if (obj.contains("sizeMatched")) {
+                out.size_shares = parse_matched_size(obj.at("sizeMatched"));
+            } else if (out.status == "matched" || out.status == "filled") {
+                out.size_shares = requested_shares;
+            }
+
+            out.ok = true;
+            if (out.size_shares > 0.0) {
+                spdlog::debug("[LIVE EXEC] poll {} attempt {} | status={} size={:.4f}",
+                              order_id.substr(0, 16), attempt + 1, out.status, out.size_shares);
+                return out;
+            }
+            if (out.status == "unmatched" || out.status == "cancelled" || out.status == "expired") {
+                return out;
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("[LIVE EXEC] poll {} attempt {} failed: {}", order_id.substr(0, 16), attempt + 1, e.what());
+        }
+    }
+    return out;
 }
 
 EIP712Signer& OrderRouter::pick_signer(bool is_neg_risk) const {

@@ -52,3 +52,7 @@ export async function botControl(action: "pause" | "resume" | "reset_kill", user
 export async function fetchAuditEvents() {
   return botFetch("/api/audit") as Promise<{ events: AuditEvent[] }>;
 }
+
+export async function fetchPreflight() {
+  return botFetch("/api/preflight") as Promise<{ preflight: Record<string, unknown> }>;
+}

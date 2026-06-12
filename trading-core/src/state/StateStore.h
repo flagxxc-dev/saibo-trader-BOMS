@@ -51,7 +51,20 @@ public:
     }
     bool dh_enable_5m() const { return dh_enable_5m_; }
     bool dh_enable_15m() const { return dh_enable_15m_; }
+    void set_dh_asset_enabled(int window_minutes, const std::string& asset, bool enabled);
+    bool dh_asset_enabled(int window_minutes, const std::string& asset) const;
     void set_binance_feed_enabled(bool enabled) { binance_feed_enabled_ = enabled; }
+
+    struct TokenFeeParams {
+        double rate = 0.0;
+        double exponent = 0.0;
+        bool from_api = false;
+    };
+    void set_token_fee_params(const std::string& token_id, double rate, double exponent);
+    TokenFeeParams get_token_fee_params(std::string_view token_id) const;
+    double compute_dh_entry_fee_per_share(
+        double yes_price, double no_price,
+        const std::string& yes_token_id, const std::string& no_token_id) const;
 
     void update_btc_price(const PriceTick& tick);
     std::optional<PriceTick> get_latest_btc_price() const;
@@ -88,6 +101,11 @@ private:
     double dh_min_seconds_remaining_ = 60.0;
     bool dh_enable_5m_ = true;
     bool dh_enable_15m_ = true;
+    bool dh_5m_btc_ = true;
+    bool dh_5m_eth_ = true;
+    bool dh_5m_sol_ = true;
+    bool dh_15m_btc_ = true;
+    bool dh_15m_eth_ = true;
     bool binance_feed_enabled_ = true;
     mutable std::shared_mutex btc_mutex_;
     PriceTick latest_btc_tick_{};
@@ -107,6 +125,7 @@ private:
     mutable std::shared_mutex token_mutex_;
     std::unordered_map<std::string, TokenPrice> token_prices_;
     std::unordered_map<std::string, TokenPrice> token_bids_;
+    std::unordered_map<std::string, TokenFeeParams> token_fee_params_;
 
     mutable std::shared_mutex market_mutex_;
     std::vector<MarketInfo> markets_;

@@ -40,6 +40,7 @@ std::optional<DumpHedgeSignal> DumpHedgeDetector::evaluate(double current_time_m
 
         if (market.window_minutes == 5 && !state_store_.dh_enable_5m()) continue;
         if (market.window_minutes == 15 && !state_store_.dh_enable_15m()) continue;
+        if (!state_store_.dh_asset_enabled(market.window_minutes, market.asset)) continue;
 
         // Check time remaining
         double seconds_remaining = market.end_date_ts - (current_time_ms / 1000.0);
@@ -65,7 +66,8 @@ std::optional<DumpHedgeSignal> DumpHedgeDetector::evaluate(double current_time_m
         if (yes_price <= 0 || no_price <= 0) continue;
 
         double combined = yes_price + no_price;
-        double entry_fees = combined * fee_rate_; 
+        double entry_fees = state_store_.compute_dh_entry_fee_per_share(
+            yes_price, no_price, market.yes_token_id, market.no_token_id);
         double discount = 1.0 - combined - entry_fees;
 
         if (combined > sum_target_) continue;

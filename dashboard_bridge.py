@@ -6,6 +6,7 @@ import threading
 import sys
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlparse
 
 from bot_config import (
@@ -20,10 +21,30 @@ from bot_config import (
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
 WS_PORT = int(os.getenv("WS_PORT", "8080"))
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8081"))
+PREFLIGHT_PATH = Path(os.getenv("PREFLIGHT_PATH", "logs/preflight.json"))
 CORE_CMD = ["./build/trading-core.exe"] if os.name == "nt" else ["./build/trading-core"]
 
 clients = set()
 latest_data = "{}"
+
+
+def _read_preflight() -> dict:
+    if not PREFLIGHT_PATH.is_file():
+        return {}
+    try:
+        return json.loads(PREFLIGHT_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _run_preflight() -> None:
+    script = Path(__file__).resolve().parent / "live_preflight.py"
+    if not script.is_file():
+        return
+    try:
+        subprocess.run([sys.executable, str(script)], check=False)
+    except Exception as exc:
+        print(f"[preflight] skipped: {exc}", file=sys.stderr)
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -61,6 +82,12 @@ class ConfigHTTPHandler(BaseHTTPRequestHandler):
                 _json_response(self, 200, {"config": public_config(), "live": json.loads(latest_data or "{}")})
             elif path == "/api/audit":
                 _json_response(self, 200, {"events": read_audit()})
+            elif path == "/api/preflight":
+                report = _read_preflight()
+                if not report:
+                    _json_response(self, 404, {"error": "preflight not run yet"})
+                else:
+                    _json_response(self, 200, {"preflight": report})
             else:
                 _json_response(self, 404, {"error": "not found"})
         except Exception as exc:
@@ -152,6 +179,7 @@ async def main():
     global loop
     loop = asyncio.get_running_loop()
 
+    _run_preflight()
     threading.Thread(target=run_http_server, daemon=True).start()
 
     async with websockets.serve(handler, WS_HOST, WS_PORT):

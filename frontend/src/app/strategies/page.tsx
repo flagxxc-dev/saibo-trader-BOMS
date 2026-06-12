@@ -12,6 +12,36 @@ import { SlidersHorizontal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLiveState } from "@/hooks/useLiveState";
 
+const ASSET_KEYS_5M = {
+  BTC: "DH_ENABLE_5M_BTC",
+  ETH: "DH_ENABLE_5M_ETH",
+  SOL: "DH_ENABLE_5M_SOL",
+} as const;
+
+const ASSET_KEYS_15M = {
+  BTC: "DH_ENABLE_15M_BTC",
+  ETH: "DH_ENABLE_15M_ETH",
+} as const;
+
+function AssetToggleRow({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between py-2 pl-3 border-l border-white/10">
+      <span className="text-[13px] font-mono text-white/75">{label}</span>
+      <Switch checked={checked} disabled={disabled} onCheckedChange={onChange} />
+    </div>
+  );
+}
+
 export default function StrategiesPage() {
   const live = useLiveState();
   const [sumTarget, setSumTarget] = useState("0.95");
@@ -22,6 +52,7 @@ export default function StrategiesPage() {
   const [message, setMessage] = useState("");
 
   const dhEnabled = live.status !== 3; // PAUSED
+  const controlsDisabled = loading || live.status === 2;
 
   useEffect(() => {
     setSumTarget(live.dhSumTarget.toFixed(3));
@@ -30,25 +61,32 @@ export default function StrategiesPage() {
     setMinRemaining(String(Math.round(live.dhMinSecondsRemaining)));
   }, [live.dhSumTarget, live.dhMinDiscount, live.dhCooldownSeconds, live.dhMinSecondsRemaining]);
 
-  const toggleWindow = async (window: "5m" | "15m", enabled: boolean) => {
+  const patchConfig = async (patch: Record<string, string>, okMessage: string) => {
     setLoading(true);
     setMessage("");
-    const key = window === "5m" ? "DH_ENABLE_5M" : "DH_ENABLE_15M";
     try {
       const res = await fetch("/api/bot/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patch: { [key]: enabled ? "true" : "false" } }),
+        body: JSON.stringify({ patch }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "操作失败");
-      setMessage(`${window} 窗口已${enabled ? "开启" : "关闭"}交易`);
+      setMessage(okMessage);
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "操作失败");
     } finally {
       setLoading(false);
     }
   };
+
+  const toggleWindow = (window: "5m" | "15m", enabled: boolean) => {
+    const key = window === "5m" ? "DH_ENABLE_5M" : "DH_ENABLE_15M";
+    return patchConfig({ [key]: enabled ? "true" : "false" }, `${window} 窗口已${enabled ? "开启" : "关闭"}交易`);
+  };
+
+  const toggleAsset = (envKey: string, label: string, enabled: boolean) =>
+    patchConfig({ [envKey]: enabled ? "true" : "false" }, `${label} 已${enabled ? "开启" : "关闭"}`);
 
   const toggleDh = async (enabled: boolean) => {
     setLoading(true);
@@ -131,39 +169,79 @@ export default function StrategiesPage() {
               <Switch
                 id="dump-hedge"
                 checked={dhEnabled}
-                disabled={loading || live.status === 2}
+                disabled={controlsDisabled}
                 onCheckedChange={toggleDh}
               />
             </div>
 
             <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-4">
-              <h4 className="text-[11px] font-medium tracking-widest uppercase text-white/40">窗口交易开关</h4>
+              <h4 className="text-[11px] font-medium tracking-widest uppercase text-white/40">窗口与币种开关</h4>
               <p className="text-[12px] text-white/40 leading-relaxed">
-                关闭后该周期不再开新仓；已有持仓照常结算。切换后立即生效。
+                先关窗口则该周期全部不交易；窗口开启后，可单独关闭某个币种（例如只跑 BTC 5m）。
               </p>
-              <div className="flex items-center justify-between py-1">
-                <Label htmlFor="dh-5m" className="flex flex-col space-y-1">
-                  <span className="font-semibold text-white/90 text-[14px]">5 分钟窗口</span>
-                  <span className="font-normal text-white/40 text-[12px]">BTC · ETH · SOL</span>
-                </Label>
-                <Switch
-                  id="dh-5m"
-                  checked={live.dhEnable5m}
-                  disabled={loading || live.status === 2}
-                  onCheckedChange={(checked) => toggleWindow("5m", checked)}
-                />
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between py-1">
+                  <Label htmlFor="dh-5m" className="flex flex-col space-y-1">
+                    <span className="font-semibold text-white/90 text-[14px]">5 分钟窗口</span>
+                    <span className="font-normal text-white/40 text-[12px]">总开关</span>
+                  </Label>
+                  <Switch
+                    id="dh-5m"
+                    checked={live.dhEnable5m}
+                    disabled={controlsDisabled}
+                    onCheckedChange={(checked) => toggleWindow("5m", checked)}
+                  />
+                </div>
+                <div className={`space-y-1 ${!live.dhEnable5m ? "opacity-40 pointer-events-none" : ""}`}>
+                  <AssetToggleRow
+                    label="BTC"
+                    checked={live.dhEnable5mBtc}
+                    disabled={controlsDisabled || !live.dhEnable5m}
+                    onChange={(checked) => toggleAsset(ASSET_KEYS_5M.BTC, "5m BTC", checked)}
+                  />
+                  <AssetToggleRow
+                    label="ETH"
+                    checked={live.dhEnable5mEth}
+                    disabled={controlsDisabled || !live.dhEnable5m}
+                    onChange={(checked) => toggleAsset(ASSET_KEYS_5M.ETH, "5m ETH", checked)}
+                  />
+                  <AssetToggleRow
+                    label="SOL"
+                    checked={live.dhEnable5mSol}
+                    disabled={controlsDisabled || !live.dhEnable5m}
+                    onChange={(checked) => toggleAsset(ASSET_KEYS_5M.SOL, "5m SOL", checked)}
+                  />
+                </div>
               </div>
-              <div className="flex items-center justify-between py-1 border-t border-white/5 pt-4">
-                <Label htmlFor="dh-15m" className="flex flex-col space-y-1">
-                  <span className="font-semibold text-white/90 text-[14px]">15 分钟窗口</span>
-                  <span className="font-normal text-white/40 text-[12px]">BTC · ETH</span>
-                </Label>
-                <Switch
-                  id="dh-15m"
-                  checked={live.dhEnable15m}
-                  disabled={loading || live.status === 2}
-                  onCheckedChange={(checked) => toggleWindow("15m", checked)}
-                />
+
+              <div className="space-y-3 border-t border-white/5 pt-4">
+                <div className="flex items-center justify-between py-1">
+                  <Label htmlFor="dh-15m" className="flex flex-col space-y-1">
+                    <span className="font-semibold text-white/90 text-[14px]">15 分钟窗口</span>
+                    <span className="font-normal text-white/40 text-[12px]">总开关</span>
+                  </Label>
+                  <Switch
+                    id="dh-15m"
+                    checked={live.dhEnable15m}
+                    disabled={controlsDisabled}
+                    onCheckedChange={(checked) => toggleWindow("15m", checked)}
+                  />
+                </div>
+                <div className={`space-y-1 ${!live.dhEnable15m ? "opacity-40 pointer-events-none" : ""}`}>
+                  <AssetToggleRow
+                    label="BTC"
+                    checked={live.dhEnable15mBtc}
+                    disabled={controlsDisabled || !live.dhEnable15m}
+                    onChange={(checked) => toggleAsset(ASSET_KEYS_15M.BTC, "15m BTC", checked)}
+                  />
+                  <AssetToggleRow
+                    label="ETH"
+                    checked={live.dhEnable15mEth}
+                    disabled={controlsDisabled || !live.dhEnable15m}
+                    onChange={(checked) => toggleAsset(ASSET_KEYS_15M.ETH, "15m ETH", checked)}
+                  />
+                </div>
               </div>
             </div>
 
@@ -187,7 +265,12 @@ export default function StrategiesPage() {
             </div>
 
             <div className="bg-white/5 p-4 rounded-xl border border-white/10 text-[13px] text-white/50">
-              标的：BTC · ETH · SOL 5m + BTC · ETH 15m · 当前扫描 {live.marketsScanned} 个市场
+              当前扫描 {live.marketsScanned} 个市场 · 5m{" "}
+              {[live.dhEnable5mBtc && "BTC", live.dhEnable5mEth && "ETH", live.dhEnable5mSol && "SOL"]
+                .filter(Boolean)
+                .join(" · ") || "全关"}{" "}
+              · 15m{" "}
+              {[live.dhEnable15mBtc && "BTC", live.dhEnable15mEth && "ETH"].filter(Boolean).join(" · ") || "全关"}
             </div>
 
             <div className="flex items-center justify-between pt-2">

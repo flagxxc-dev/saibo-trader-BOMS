@@ -325,6 +325,36 @@ static bool parse_config_bool(const std::string& v) {
     return !(lower == "false" || lower == "0" || lower == "no" || lower == "off");
 }
 
+static bool apply_dh_asset_config(StateStore& store, const std::string& k, const std::string& v) {
+    const bool enabled = parse_config_bool(v);
+    if (k == "DH_ENABLE_5M_BTC") {
+        store.set_dh_asset_enabled(5, "btc", enabled);
+        store.push_telemetry(fmt::format("CONFIG DH_ENABLE_5M_BTC={}", enabled ? "true" : "false"));
+        return true;
+    }
+    if (k == "DH_ENABLE_5M_ETH") {
+        store.set_dh_asset_enabled(5, "eth", enabled);
+        store.push_telemetry(fmt::format("CONFIG DH_ENABLE_5M_ETH={}", enabled ? "true" : "false"));
+        return true;
+    }
+    if (k == "DH_ENABLE_5M_SOL") {
+        store.set_dh_asset_enabled(5, "sol", enabled);
+        store.push_telemetry(fmt::format("CONFIG DH_ENABLE_5M_SOL={}", enabled ? "true" : "false"));
+        return true;
+    }
+    if (k == "DH_ENABLE_15M_BTC") {
+        store.set_dh_asset_enabled(15, "btc", enabled);
+        store.push_telemetry(fmt::format("CONFIG DH_ENABLE_15M_BTC={}", enabled ? "true" : "false"));
+        return true;
+    }
+    if (k == "DH_ENABLE_15M_ETH") {
+        store.set_dh_asset_enabled(15, "eth", enabled);
+        store.push_telemetry(fmt::format("CONFIG DH_ENABLE_15M_ETH={}", enabled ? "true" : "false"));
+        return true;
+    }
+    return false;
+}
+
 static void apply_runtime_config(
     const std::string& path,
     risk::RiskManager& risk_manager,
@@ -420,6 +450,7 @@ static void apply_runtime_config(
                     bool enabled = parse_config_bool(v);
                     store.set_dh_window_enabled(store.dh_enable_5m(), enabled);
                     store.push_telemetry(fmt::format("CONFIG DH_ENABLE_15M={}", enabled ? "true" : "false"));
+                } else if (apply_dh_asset_config(store, k, v)) {
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("Failed to apply config {}={}: {}", k, v, e.what());
@@ -612,6 +643,11 @@ int main() {
         store.set_dh_window_enabled(
             env_flag_true(env, "DH_ENABLE_5M", true),
             env_flag_true(env, "DH_ENABLE_15M", true));
+        store.set_dh_asset_enabled(5, "btc", env_flag_true(env, "DH_ENABLE_5M_BTC", true));
+        store.set_dh_asset_enabled(5, "eth", env_flag_true(env, "DH_ENABLE_5M_ETH", true));
+        store.set_dh_asset_enabled(5, "sol", env_flag_true(env, "DH_ENABLE_5M_SOL", true));
+        store.set_dh_asset_enabled(15, "btc", env_flag_true(env, "DH_ENABLE_15M_BTC", true));
+        store.set_dh_asset_enabled(15, "eth", env_flag_true(env, "DH_ENABLE_15M_ETH", true));
         store.set_binance_feed_enabled(binance_feed_enabled);
 
         exec::OrderRouter router(feed_ioc, feed_ctx, store, risk_manager, polymarket_host, polymarket_chain_id, verifying_contract, polymarket_pk, polymarket_signer, polymarket_funder, paper_mode, poly_api_key, poly_api_secret, poly_api_passphrase, neg_risk_exchange);
@@ -681,6 +717,13 @@ int main() {
                 all_m.insert(all_m.end(), e15.begin(), e15.end());
 
                 store.update_markets(all_m);
+                std::unordered_set<std::string> fee_seen;
+                int fee_markets = 0;
+                for (const auto& m : all_m) {
+                    if (m.condition_id.empty() || fee_seen.count(m.condition_id)) continue;
+                    fee_seen.insert(m.condition_id);
+                    if (gamma.fetch_and_cache_market_fees(m.condition_id, store)) ++fee_markets;
+                }
                 {
                     std::lock_guard<std::mutex> lock(detector_mutex);
                     dh_detector = std::make_unique<DumpHedgeDetector>(store, all_m, dh_sum_target, dh_min_discount, dh_min_secs, dh_cooldown);
@@ -689,8 +732,8 @@ int main() {
                 std::vector<std::string> tokens;
                 for (const auto& m : all_m) { tokens.push_back(m.yes_token_id); tokens.push_back(m.no_token_id); }
                 if (!tokens.empty()) poly_feed->subscribe(tokens);
-                store.push_telemetry(fmt::format("MARKETS REFRESHED | {} markets | {} tokens",
-                    all_m.size(), tokens.size()));
+                store.push_telemetry(fmt::format("MARKETS REFRESHED | {} markets | {} tokens | fee_curve {}",
+                    all_m.size(), tokens.size(), fee_markets));
             } catch (const std::exception& e) {
                 spdlog::error("Refresh markets failed: {}", e.what());
             }
