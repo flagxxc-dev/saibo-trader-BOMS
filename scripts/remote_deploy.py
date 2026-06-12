@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import time
@@ -127,6 +128,22 @@ def main() -> int:
             ]
             for step in steps:
                 run(client, step, timeout=180)
+            return 0
+
+        if mode == "cleanup":
+            cleanup_sh = ROOT / "scripts" / "server_disk_cleanup.sh"
+            remote = f"{PROJ}/server_disk_cleanup.sh"
+            purge = os.environ.get("PURGE_MONGO_DATA", "0")
+            sftp = client.open_sftp()
+            sftp.put(str(cleanup_sh), remote)
+            sftp.close()
+            steps = [
+                f"chmod +x '{remote}'",
+                f"PURGE_MONGO_DATA={purge} bash '{remote}'",
+                "du -sh /var/log/mongodb /var/lib/mongo /opt/polycopy/backups 2>/dev/null || true",
+            ]
+            for step in steps:
+                run(client, step, timeout=300)
             return 0
 
         if mode == "web":
