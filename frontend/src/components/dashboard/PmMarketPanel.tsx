@@ -262,14 +262,14 @@ export function PmMarketPanel({
         <div className="flex items-center justify-between flex-wrap gap-2">
           <CardTitle className="font-heading text-lg font-semibold tracking-tight text-gradient flex items-center gap-2">
             <LineChart className="h-4 w-4" />
-            实时行情（Polymarket）
+            实时行情
           </CardTitle>
-          <div className="text-[11px] font-mono text-white/40">
+          <div className="text-[11px] font-mono text-muted-foreground">
             扫描 {marketsScanned} 个市场 · DH 5m+15m · 合价目标 ≤ {dhSumTarget.toFixed(2)}
           </div>
         </div>
-        <p className="text-[11px] text-white/35 mt-2 leading-relaxed">
-          下方为 YES+NO 卖一合价。5 分钟与 15 分钟市场均参与 DH 开仓（净折扣 ≥ {(dhMinDiscount * 100).toFixed(1)}% 且合价 ≤{" "}
+        <p className="text-[11px] text-muted-foreground mt-2 leading-relaxed">
+          YES+NO 卖一合价。5m / 15m 市场参与 DH 开仓（净折扣 ≥ {(dhMinDiscount * 100).toFixed(1)}% 且合价 ≤{" "}
           {dhSumTarget}）。
         </p>
       </CardHeader>

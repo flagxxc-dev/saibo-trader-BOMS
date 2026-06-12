@@ -456,6 +456,50 @@ void RiskManager::set_live_starting_balance(double balance) {
     spdlog::info("Live baseline balances reset to ${:.2f}", balance);
 }
 
+double RiskManager::get_max_position_fraction() const {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    return max_position_fraction_;
+}
+
+double RiskManager::get_daily_loss_limit() const {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    return daily_loss_limit_;
+}
+
+double RiskManager::get_total_drawdown_kill() const {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    return total_drawdown_kill_;
+}
+
+int RiskManager::get_max_concurrent_positions() const {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    return max_concurrent_positions_;
+}
+
+void RiskManager::set_max_position_fraction(double v) {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    max_position_fraction_ = v;
+    spdlog::info("Risk config updated | max_position_fraction={:.2f}", v);
+}
+
+void RiskManager::set_daily_loss_limit(double v) {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    daily_loss_limit_ = v;
+    spdlog::info("Risk config updated | daily_loss_limit={:.2f}", v);
+}
+
+void RiskManager::set_total_drawdown_kill(double v) {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    total_drawdown_kill_ = v;
+    spdlog::info("Risk config updated | total_drawdown_kill={:.2f}", v);
+}
+
+void RiskManager::set_max_concurrent_positions(int v) {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    max_concurrent_positions_ = v;
+    spdlog::info("Risk config updated | max_concurrent_positions={}", v);
+}
+
 void RiskManager::pause(const std::string& reason) {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
     if (status_ == TradingStatus::ACTIVE) {

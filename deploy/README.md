@@ -137,15 +137,27 @@ pip install -r requirements.txt
 # 纸面模式可跳过；实盘会写 POLY_API_KEY 等到 .env
 python3 derive_and_update_keys.py
 
-# 前台运行（bridge 会拉起 trading-core，WS 监听 8080）
-python3 dashboard_bridge.py
+# 前台运行（推荐：自检 + 配置摘要 + bridge/core，终端可见输出）
+python3 start_bot.py
+
+# 仅自检（不启动 bot）
+# python3 start_bot.py --preflight-only
+# python3 start_bot.py --json-only          # 脚本用，只打 JSON
+
+# 查看状态（bot 已在跑时）
+# python3 status_bot.py --live
+
+# 或直接跑 bridge（跳过 start_bot 包装）
+# python3 dashboard_bridge.py
 ```
 
 **后台运行示例：**
 
 ```bash
 mkdir -p logs
-nohup python3 dashboard_bridge.py >> logs/bridge.log 2>&1 &
+nohup python3 start_bot.py >> logs/bridge.log 2>&1 &
+# 查看状态
+python3 status_bot.py --live
 ```
 
 环境变量（可选）：

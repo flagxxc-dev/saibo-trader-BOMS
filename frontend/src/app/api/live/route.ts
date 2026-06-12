@@ -1,8 +1,14 @@
 import { WebSocket } from "ws";
+import { requireSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const session = await requireSession();
+  if (!session) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   const wsUrl = process.env.BOT_WS_URL || "ws://127.0.0.1:8080";
 
   const stream = new ReadableStream({

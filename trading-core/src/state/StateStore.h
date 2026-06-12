@@ -37,7 +37,34 @@ public:
         dh_sum_target_ = sum_target;
         dh_min_discount_ = min_discount;
     }
+    void set_dh_timing(double cooldown_seconds, double min_seconds_remaining) {
+        dh_cooldown_seconds_ = cooldown_seconds;
+        dh_min_seconds_remaining_ = min_seconds_remaining;
+    }
+    double get_dh_sum_target() const { return dh_sum_target_; }
+    double get_dh_min_discount() const { return dh_min_discount_; }
+    double get_dh_cooldown_seconds() const { return dh_cooldown_seconds_; }
+    double get_dh_min_seconds_remaining() const { return dh_min_seconds_remaining_; }
+    void set_dh_window_enabled(bool enable_5m, bool enable_15m) {
+        dh_enable_5m_ = enable_5m;
+        dh_enable_15m_ = enable_15m;
+    }
+    bool dh_enable_5m() const { return dh_enable_5m_; }
+    bool dh_enable_15m() const { return dh_enable_15m_; }
+    void set_dh_asset_enabled(int window_minutes, const std::string& asset, bool enabled);
+    bool dh_asset_enabled(int window_minutes, const std::string& asset) const;
     void set_binance_feed_enabled(bool enabled) { binance_feed_enabled_ = enabled; }
+
+    struct TokenFeeParams {
+        double rate = 0.0;
+        double exponent = 0.0;
+        bool from_api = false;
+    };
+    void set_token_fee_params(const std::string& token_id, double rate, double exponent);
+    TokenFeeParams get_token_fee_params(std::string_view token_id) const;
+    double compute_dh_entry_fee_per_share(
+        double yes_price, double no_price,
+        const std::string& yes_token_id, const std::string& no_token_id) const;
 
     void update_btc_price(const PriceTick& tick);
     std::optional<PriceTick> get_latest_btc_price() const;
@@ -70,6 +97,15 @@ private:
     std::string strategy_ = "dump_hedge";
     double dh_sum_target_ = 0.95;
     double dh_min_discount_ = 0.02;
+    double dh_cooldown_seconds_ = 30.0;
+    double dh_min_seconds_remaining_ = 60.0;
+    bool dh_enable_5m_ = true;
+    bool dh_enable_15m_ = true;
+    bool dh_5m_btc_ = true;
+    bool dh_5m_eth_ = true;
+    bool dh_5m_sol_ = true;
+    bool dh_15m_btc_ = true;
+    bool dh_15m_eth_ = true;
     bool binance_feed_enabled_ = true;
     mutable std::shared_mutex btc_mutex_;
     PriceTick latest_btc_tick_{};
@@ -89,6 +125,7 @@ private:
     mutable std::shared_mutex token_mutex_;
     std::unordered_map<std::string, TokenPrice> token_prices_;
     std::unordered_map<std::string, TokenPrice> token_bids_;
+    std::unordered_map<std::string, TokenFeeParams> token_fee_params_;
 
     mutable std::shared_mutex market_mutex_;
     std::vector<MarketInfo> markets_;
@@ -96,7 +133,7 @@ private:
     mutable std::shared_mutex log_mutex_;
     std::deque<std::string> telemetry_log_;
     std::deque<std::string> signal_log_;
-    static constexpr size_t MAX_LOG_LINES = 30;
+    static constexpr size_t MAX_LOG_LINES = 100;
 };
 
 } // namespace trading

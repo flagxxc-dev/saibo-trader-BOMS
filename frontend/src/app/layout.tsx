@@ -23,7 +23,7 @@ const jetbrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "赛博交易员",
-  description: "Polymarket 加密货币自动化交易控制台",
+  description: "安全访问控制台",
 };
 
 export default function RootLayout({

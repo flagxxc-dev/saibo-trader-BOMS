@@ -24,6 +24,8 @@ public:
     void set_sum_target(double val) { sum_target_ = val; }
     void set_min_discount(double val) { min_discount_ = val; }
     void set_fee_rate(double val) { fee_rate_ = val; }
+    void set_cooldown_seconds(double val) { cooldown_seconds_ = val; }
+    void set_min_seconds_remaining(double val) { min_seconds_remaining_ = val; }
 
 private:
     StateStore& state_store_;

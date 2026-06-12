@@ -3,7 +3,6 @@
 import { signIn } from "next-auth/react";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { GlassCard, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/shared/GlassCard";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -11,7 +10,7 @@ import { APP_NAME } from "@/lib/branding";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -23,7 +22,7 @@ export default function LoginPage() {
 
     const res = await signIn("credentials", {
       redirect: false,
-      email,
+      username,
       password,
     });
 
@@ -32,69 +31,60 @@ export default function LoginPage() {
       setLoading(false);
     } else {
       router.push("/dashboard");
+      router.refresh();
     }
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen text-white selection:bg-white/20 relative">
-      <div className="mesh-bg" />
-      <GlassCard className="w-full max-w-md z-10 p-4 shadow-2xl">
-        <CardHeader className="space-y-1">
-          <CardTitle className="text-3xl font-bold text-center text-white drop-shadow-sm">{APP_NAME}</CardTitle>
-          <CardDescription className="text-center text-white/70">
-            输入账号和密码，登录交易控制台
-          </CardDescription>
-        </CardHeader>
-        <form onSubmit={handleSubmit}>
-          <CardContent className="space-y-4">
+    <div className="min-h-screen login-bg text-foreground">
+      <div className="mx-auto flex min-h-screen max-w-lg flex-col items-center justify-center p-6">
+        <div className="panel w-full p-8 shadow-2xl">
+          <div className="mb-8 text-center">
+            <p className="font-mono text-[10px] font-bold uppercase tracking-[0.4em] text-muted-foreground">
+              Secure Access
+            </p>
+            <h1 className="mt-3 font-heading text-3xl font-extrabold tracking-tight text-gradient-accent">
+              {APP_NAME}
+            </h1>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-5">
             {error && (
-              <div className="p-3 text-sm text-red-500 bg-red-500/10 rounded-md">{error}</div>
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                {error}
+              </div>
             )}
             <div className="space-y-2">
-              <Label htmlFor="email">账号</Label>
+              <Label htmlFor="username">账号</Label>
               <Input
-                id="email"
+                id="username"
                 type="text"
                 placeholder="admin"
+                autoComplete="username"
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="bg-white/5 border-white/10 text-white focus-visible:ring-white/50 rounded-xl"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="h-11 border-border/80 bg-background/80 font-mono"
               />
             </div>
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="password">密码</Label>
-                <button
-                  type="button"
-                  onClick={() => router.push("/forgot-password")}
-                  className="text-xs text-muted-foreground hover:underline"
-                >
-                  忘记密码？
-                </button>
-              </div>
+              <Label htmlFor="password">密码</Label>
               <Input
                 id="password"
                 type="password"
+                autoComplete="current-password"
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="bg-white/5 border-white/10 text-white focus-visible:ring-white/50 rounded-xl"
+                className="h-11 border-border/80 bg-background/80"
               />
             </div>
-          </CardContent>
-          <CardFooter>
-            <Button
-              type="submit"
-              variant="glass"
-              className="w-full h-12 font-extrabold tracking-tight rounded-2xl text-lg"
-              disabled={loading}
-            >
-              {loading ? "登录中..." : "登录"}
+            <Button type="submit" variant="glass" className="h-11 w-full font-semibold" disabled={loading}>
+              {loading ? "验证中..." : "登录"}
             </Button>
-          </CardFooter>
-        </form>
-      </GlassCard>
+          </form>
+        </div>
+      </div>
     </div>
   );
 }

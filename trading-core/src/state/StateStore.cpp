@@ -3,8 +3,73 @@
 #include <boost/json.hpp>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 namespace trading {
+
+namespace {
+double effective_platform_fee_per_share(double price, const StateStore::TokenFeeParams& p) {
+    if (!p.from_api || p.rate <= 0.0 || price <= 0.0 || price >= 1.0) return 0.0;
+    return p.rate * std::pow(price * (1.0 - price), p.exponent);
+}
+} // namespace
+
+void StateStore::set_token_fee_params(const std::string& token_id, double rate, double exponent) {
+    std::unique_lock lock(token_mutex_);
+    token_fee_params_[token_id] = TokenFeeParams{rate, exponent, rate > 0.0};
+}
+
+StateStore::TokenFeeParams StateStore::get_token_fee_params(std::string_view token_id) const {
+    std::shared_lock lock(token_mutex_);
+    auto it = token_fee_params_.find(std::string(token_id));
+    if (it != token_fee_params_.end()) return it->second;
+    return {};
+}
+
+double StateStore::compute_dh_entry_fee_per_share(
+    double yes_price, double no_price,
+    const std::string& yes_token_id, const std::string& no_token_id) const
+{
+    auto yes_fee = get_token_fee_params(yes_token_id);
+    auto no_fee = get_token_fee_params(no_token_id);
+    if (yes_fee.from_api || no_fee.from_api) {
+        return effective_platform_fee_per_share(yes_price, yes_fee)
+             + effective_platform_fee_per_share(no_price, no_fee);
+    }
+    return (yes_price + no_price) * fee_rate_;
+}
+
+namespace {
+std::string normalize_asset_key(std::string asset) {
+    std::transform(asset.begin(), asset.end(), asset.begin(), ::tolower);
+    return asset;
+}
+} // namespace
+
+void StateStore::set_dh_asset_enabled(int window_minutes, const std::string& asset, bool enabled) {
+    const std::string a = normalize_asset_key(asset);
+    if (window_minutes == 5) {
+        if (a == "btc") dh_5m_btc_ = enabled;
+        else if (a == "eth") dh_5m_eth_ = enabled;
+        else if (a == "sol") dh_5m_sol_ = enabled;
+    } else if (window_minutes == 15) {
+        if (a == "btc") dh_15m_btc_ = enabled;
+        else if (a == "eth") dh_15m_eth_ = enabled;
+    }
+}
+
+bool StateStore::dh_asset_enabled(int window_minutes, const std::string& asset) const {
+    const std::string a = normalize_asset_key(asset);
+    if (window_minutes == 5) {
+        if (a == "btc") return dh_5m_btc_;
+        if (a == "eth") return dh_5m_eth_;
+        if (a == "sol") return dh_5m_sol_;
+    } else if (window_minutes == 15) {
+        if (a == "btc") return dh_15m_btc_;
+        if (a == "eth") return dh_15m_eth_;
+    }
+    return true;
+}
 
 void StateStore::push_telemetry(const std::string& line) {
     std::unique_lock lock(log_mutex_);
@@ -140,6 +205,15 @@ std::string StateStore::get_dashboard_json() const {
     root["strategy"] = strategy_.c_str();
     root["dhSumTarget"] = dh_sum_target_;
     root["dhMinDiscount"] = dh_min_discount_;
+    root["dhCooldownSeconds"] = dh_cooldown_seconds_;
+    root["dhMinSecondsRemaining"] = dh_min_seconds_remaining_;
+    root["dhEnable5m"] = dh_enable_5m_;
+    root["dhEnable15m"] = dh_enable_15m_;
+    root["dhEnable5mBtc"] = dh_5m_btc_;
+    root["dhEnable5mEth"] = dh_5m_eth_;
+    root["dhEnable5mSol"] = dh_5m_sol_;
+    root["dhEnable15mBtc"] = dh_15m_btc_;
+    root["dhEnable15mEth"] = dh_15m_eth_;
     root["binanceFeedEnabled"] = binance_feed_enabled_;
     
     if (risk_manager_) {
@@ -172,6 +246,18 @@ std::string StateStore::get_dashboard_json() const {
         root["isPaperMode"] = paper_mode_;
         root["startingBalance"] = start;
         root["feeRate"] = fee_rate_;
+        root["feeModel"] = "polymarket_v2_curve";
+        root["useDynamicFees"] = [&]() {
+            std::shared_lock lock(token_mutex_);
+            for (const auto& [_, p] : token_fee_params_) {
+                if (p.from_api) return true;
+            }
+            return false;
+        }();
+        root["riskMaxPositionFraction"] = risk_manager_->get_max_position_fraction();
+        root["riskDailyLossLimit"] = risk_manager_->get_daily_loss_limit();
+        root["riskTotalDrawdownKill"] = risk_manager_->get_total_drawdown_kill();
+        root["riskMaxConcurrentPositions"] = risk_manager_->get_max_concurrent_positions();
 
         std::vector<MarketInfo> markets_snapshot;
         { std::shared_lock lock(market_mutex_); markets_snapshot = markets_; }
@@ -257,7 +343,8 @@ std::string StateStore::get_dashboard_json() const {
             po["noCost"] = p.no_entry_price * p.size_shares;
             po["yesLivePrice"] = token_live(p.yes_token_id);
             po["noLivePrice"] = token_live(p.no_token_id);
-            po["entryFee"] = p.combined_cost_usdc * fee_rate_;
+            po["entryFee"] = compute_dh_entry_fee_per_share(
+                p.yes_entry_price, p.no_entry_price, p.yes_token_id, p.no_token_id) * p.size_shares;
             po["pnl"] = p.locked_profit_usdc;
             pos_arr.push_back(po);
         }

@@ -1,4 +1,5 @@
 #include "GammaClient.h"
+#include "../state/StateStore.h"
 #include <spdlog/spdlog.h>
 #include <boost/json.hpp>
 #include <boost/beast/core.hpp>
@@ -255,6 +256,57 @@ std::vector<MarketInfo> GammaClient::fetch_updown_markets(const std::string& ass
         spdlog::error("GammaClient error for {}: {}", asset, e.what());
     }
     return results;
+}
+
+bool GammaClient::fetch_and_cache_market_fees(const std::string& condition_id, StateStore& store) {
+    if (condition_id.empty()) return false;
+    try {
+        std::string target = "/clob-markets/" + condition_id;
+        std::string body = http_get("clob.polymarket.com", target);
+        auto jv = boost::json::parse(body);
+        if (!jv.is_object()) return false;
+        const auto& obj = jv.as_object();
+
+        double rate = 0.0, exponent = 0.0;
+        if (obj.contains("fd") && obj.at("fd").is_object()) {
+            const auto& fd = obj.at("fd").as_object();
+            if (fd.contains("r")) {
+                const auto& rv = fd.at("r");
+                if (rv.is_double()) rate = rv.as_double();
+                else if (rv.is_string()) rate = std::stod(std::string(rv.as_string()));
+                else if (rv.is_int64()) rate = static_cast<double>(rv.as_int64());
+            }
+            if (fd.contains("e")) {
+                const auto& ev = fd.at("e");
+                if (ev.is_double()) exponent = ev.as_double();
+                else if (ev.is_string()) exponent = std::stod(std::string(ev.as_string()));
+                else if (ev.is_int64()) exponent = static_cast<double>(ev.as_int64());
+            }
+        }
+        if (rate <= 0.0) return false;
+
+        int cached = 0;
+        if (obj.contains("t") && obj.at("t").is_array()) {
+            for (const auto& tok_v : obj.at("t").as_array()) {
+                if (!tok_v.is_object()) continue;
+                const auto& tok = tok_v.as_object();
+                if (!tok.contains("t")) continue;
+                std::string tid = std::string(tok.at("t").as_string());
+                if (tid.empty()) continue;
+                store.set_token_fee_params(tid, rate, exponent);
+                ++cached;
+            }
+        }
+        if (cached > 0) {
+            spdlog::debug("GammaClient: fee curve r={:.4f} e={:.2f} cached for {} tokens ({})",
+                          rate, exponent, cached, condition_id.substr(0, 12));
+        }
+        return cached > 0;
+    } catch (const std::exception& e) {
+        spdlog::debug("GammaClient::fetch_and_cache_market_fees failed for {}: {}",
+                      condition_id.substr(0, 12), e.what());
+        return false;
+    }
 }
 
 } // namespace trading

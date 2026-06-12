@@ -3,34 +3,44 @@ import CredentialsProvider from "next-auth/providers/credentials";
 import { prisma } from "@/lib/prisma";
 import bcrypt from "bcryptjs";
 
+async function verifyCredentials(username: string, password: string) {
+  const user = await prisma.user.findUnique({
+    where: { email: username },
+  });
+
+  if (user) {
+    const ok = await bcrypt.compare(password, user.password);
+    if (ok) return { id: user.id, email: user.email };
+  }
+
+  const envUser = process.env.AUTH_USERNAME?.trim();
+  const envPass = process.env.AUTH_PASSWORD?.trim();
+  if (envUser && envPass && username === envUser && password === envPass) {
+    return { id: "env-admin", email: envUser };
+  }
+
+  return null;
+}
+
 export const authOptions: NextAuthOptions = {
   providers: [
     CredentialsProvider({
       name: "Credentials",
       credentials: {
-        email: { label: "Email", type: "email", placeholder: "admin@example.com" },
-        password: { label: "Password", type: "password" },
+        username: { label: "账号", type: "text" },
+        password: { label: "密码", type: "password" },
       },
       async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) return null;
-
-        const user = await prisma.user.findUnique({
-          where: { email: credentials.email },
-        });
-
-        if (!user) return null;
-
-        const isPasswordValid = await bcrypt.compare(credentials.password, user.password);
-
-        if (!isPasswordValid) return null;
-
-        return { id: user.id, email: user.email };
+        const username = credentials?.username?.trim();
+        const password = credentials?.password ?? "";
+        if (!username || !password) return null;
+        return verifyCredentials(username, password);
       },
     }),
   ],
   session: {
     strategy: "jwt",
-    maxAge: 30 * 24 * 60 * 60, // 30 days
+    maxAge: 30 * 24 * 60 * 60,
   },
   pages: {
     signIn: "/login",
@@ -45,7 +55,7 @@ export const authOptions: NextAuthOptions = {
     async session({ session, token }) {
       if (token && session.user) {
         session.user.email = token.email;
-        // @ts-ignore
+        // @ts-expect-error extended session user
         session.user.id = token.id;
       }
       return session;

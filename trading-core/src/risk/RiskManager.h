@@ -141,12 +141,22 @@ public:
     void set_fee_rate(double rate) { fee_rate_ = rate; }
     double get_fee_rate() const { return fee_rate_; }
 
-    // Flat-close any open LA positions left from older sessions (strategy removed).
-    int close_legacy_la_positions();
+    double get_max_position_fraction() const;
+    double get_daily_loss_limit() const;
+    double get_total_drawdown_kill() const;
+    int get_max_concurrent_positions() const;
+
+    void set_max_position_fraction(double v);
+    void set_daily_loss_limit(double v);
+    void set_total_drawdown_kill(double v);
+    void set_max_concurrent_positions(int v);
 
     void pause(const std::string& reason = "Manual pause");
     bool resume();
     bool reset_kill_switch(bool confirm = false);
+
+    // Flat-close any open LA positions left from older sessions (strategy removed).
+    int close_legacy_la_positions();
 
     // Paper mode persistence (JSON snapshot)
     boost::json::object export_paper_state() const;

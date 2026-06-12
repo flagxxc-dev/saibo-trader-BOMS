@@ -84,34 +84,40 @@
 }
 
 .dark {
-  --background: oklch(0.15 0.05 260); /* Deep indigo base */
-  --foreground: oklch(0.98 0 0);
-  --card: oklch(0.2 0.05 260 / 30%); /* Translucent dark */
-  --card-foreground: oklch(0.98 0 0);
-  --popover: oklch(0.18 0.05 260 / 60%);
-  --popover-foreground: oklch(0.98 0 0);
-  --primary: oklch(0.98 0 0);
-  --primary-foreground: oklch(0.1 0 0);
-  --secondary: oklch(0.3 0.1 260 / 40%);
-  --secondary-foreground: oklch(0.98 0 0);
-  --muted: oklch(0.3 0.1 260 / 40%);
-  --muted-foreground: oklch(0.75 0 0);
-  --accent: oklch(0.3 0.1 260 / 40%);
-  --accent-foreground: oklch(0.98 0 0);
-  --destructive: oklch(0.65 0.2 20);
-  --border: oklch(1 0 0 / 10%); /* Subtle white borders everywhere */
-  --input: oklch(1 0 0 / 10%);
-  --ring: oklch(1 0 0 / 30%);
-  --sidebar: oklch(0.15 0.05 260 / 40%);
-  --sidebar-foreground: oklch(0.98 0 0);
-  --sidebar-primary: oklch(0.98 0 0);
-  --sidebar-primary-foreground: oklch(0.1 0 0);
-  --sidebar-accent: oklch(0.3 0.1 260 / 40%);
-  --sidebar-accent-foreground: oklch(0.98 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(1 0 0 / 30%);
+  --background: oklch(0.11 0.02 280);
+  --foreground: oklch(0.94 0.01 280);
+  --card: oklch(0.15 0.025 280 / 70%);
+  --card-foreground: oklch(0.94 0 0);
+  --popover: oklch(0.14 0.02 280 / 92%);
+  --popover-foreground: oklch(0.94 0 0);
+  --primary: oklch(0.78 0.14 75);
+  --primary-foreground: oklch(0.14 0.02 75);
+  --secondary: oklch(0.2 0.03 280 / 55%);
+  --secondary-foreground: oklch(0.92 0 0);
+  --muted: oklch(0.2 0.025 280 / 45%);
+  --muted-foreground: oklch(0.62 0.02 280);
+  --accent: oklch(0.55 0.16 290 / 35%);
+  --accent-foreground: oklch(0.95 0 0);
+  --destructive: oklch(0.6 0.22 25);
+  --border: oklch(1 0 0 / 7%);
+  --input: oklch(1 0 0 / 9%);
+  --ring: oklch(0.78 0.14 75 / 40%);
+  --sidebar: oklch(0.09 0.02 280 / 92%);
+  --sidebar-foreground: oklch(0.9 0 0);
+  --sidebar-primary: oklch(0.78 0.14 75);
+  --sidebar-primary-foreground: oklch(0.12 0.02 75);
+  --sidebar-accent: oklch(0.22 0.04 290 / 50%);
+  --sidebar-accent-foreground: oklch(0.95 0 0);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --sidebar-ring: oklch(0.78 0.14 75 / 35%);
+  --chart-1: oklch(0.78 0.14 75);
+  --chart-2: oklch(0.62 0.18 290);
+  --chart-3: oklch(0.72 0.12 200);
+  --chart-4: oklch(0.62 0.2 25);
+  --chart-5: oklch(0.7 0.1 155);
 }
 
+/* Legacy mesh (kept for gradual migration) */
 .mesh-bg {
   position: fixed;
   inset: 0;
@@ -202,10 +208,53 @@
 }
 
 .text-gradient-accent {
-  background: linear-gradient(135deg, #c084fc 0%, #6366f1 50%, #22d3ee 100%);
+  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 45%, #c084fc 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+.text-gradient-terminal {
+  background: linear-gradient(135deg, #fafafa 0%, #a1a1aa 50%, #fbbf24 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -0.03em;
+}
+
+.login-bg {
+  background-color: #08080c;
+  background-image:
+    radial-gradient(ellipse 70% 50% at 50% -10%, rgba(251, 191, 36, 0.08), transparent),
+    radial-gradient(ellipse 40% 30% at 100% 100%, rgba(192, 132, 252, 0.06), transparent);
+}
+
+.cockpit-bg {
+  position: relative;
+  background-color: #0c0a10;
+  background-image:
+    radial-gradient(ellipse 60% 40% at 0% 0%, rgba(251, 191, 36, 0.06), transparent),
+    radial-gradient(ellipse 50% 40% at 100% 100%, rgba(139, 92, 246, 0.08), transparent);
+}
+
+.panel {
+  background: rgba(12, 10, 16, 0.78);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 1rem;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+}
+
+.stat-card {
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.01) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 1rem;
+  transition: border-color 0.2s ease;
+}
+
+.stat-card:hover {
+  border-color: rgba(251, 191, 36, 0.2);
 }
 
 @layer base {

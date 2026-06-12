@@ -81,10 +81,25 @@ export interface LiveState {
   statusReason: string;
   isPaperMode: boolean;
   feeRate: number;
+  feeModel: string;
+  useDynamicFees: boolean;
   strategy: string;
   binanceFeedEnabled: boolean;
   dhSumTarget: number;
   dhMinDiscount: number;
+  dhCooldownSeconds: number;
+  dhMinSecondsRemaining: number;
+  dhEnable5m: boolean;
+  dhEnable15m: boolean;
+  dhEnable5mBtc: boolean;
+  dhEnable5mEth: boolean;
+  dhEnable5mSol: boolean;
+  dhEnable15mBtc: boolean;
+  dhEnable15mEth: boolean;
+  riskMaxPositionFraction: number;
+  riskDailyLossLimit: number;
+  riskTotalDrawdownKill: number;
+  riskMaxConcurrentPositions: number;
   btcPrice: number;
   ethPrice: number;
   solPrice: number;
@@ -114,10 +129,25 @@ const defaultState: LiveState = {
   statusReason: "",
   isPaperMode: true,
   feeRate: 0.018,
+  feeModel: "polymarket_v2_curve",
+  useDynamicFees: false,
   strategy: "dump_hedge",
   binanceFeedEnabled: true,
   dhSumTarget: 0.95,
   dhMinDiscount: 0.02,
+  dhCooldownSeconds: 30,
+  dhMinSecondsRemaining: 60,
+  dhEnable5m: true,
+  dhEnable15m: true,
+  dhEnable5mBtc: true,
+  dhEnable5mEth: true,
+  dhEnable5mSol: true,
+  dhEnable15mBtc: true,
+  dhEnable15mEth: true,
+  riskMaxPositionFraction: 0.08,
+  riskDailyLossLimit: 0.2,
+  riskTotalDrawdownKill: 0.4,
+  riskMaxConcurrentPositions: 3,
   btcPrice: 0,
   ethPrice: 0,
   solPrice: 0,
@@ -310,10 +340,25 @@ function normalizeLiveState(raw: Record<string, unknown>): LiveState {
     statusReason: String(raw.statusReason ?? ""),
     isPaperMode: raw.isPaperMode !== false,
     feeRate,
+    feeModel: String(raw.feeModel ?? "polymarket_v2_curve"),
+    useDynamicFees: raw.useDynamicFees === true,
     strategy: String(raw.strategy ?? "dump_hedge"),
     binanceFeedEnabled: raw.binanceFeedEnabled !== false,
     dhSumTarget: toNumber(raw.dhSumTarget, 0.95) || 0.95,
     dhMinDiscount: toNumber(raw.dhMinDiscount, 0.02) || 0.02,
+    dhCooldownSeconds: toNumber(raw.dhCooldownSeconds, 30) || 30,
+    dhMinSecondsRemaining: toNumber(raw.dhMinSecondsRemaining, 60) || 60,
+    dhEnable5m: raw.dhEnable5m !== false,
+    dhEnable15m: raw.dhEnable15m !== false,
+    dhEnable5mBtc: raw.dhEnable5mBtc !== false,
+    dhEnable5mEth: raw.dhEnable5mEth !== false,
+    dhEnable5mSol: raw.dhEnable5mSol !== false,
+    dhEnable15mBtc: raw.dhEnable15mBtc !== false,
+    dhEnable15mEth: raw.dhEnable15mEth !== false,
+    riskMaxPositionFraction: toNumber(raw.riskMaxPositionFraction, 0.08) || 0.08,
+    riskDailyLossLimit: toNumber(raw.riskDailyLossLimit, 0.2) || 0.2,
+    riskTotalDrawdownKill: toNumber(raw.riskTotalDrawdownKill, 0.4) || 0.4,
+    riskMaxConcurrentPositions: toNumber(raw.riskMaxConcurrentPositions, 3) || 3,
     btcPrice: toNumber(raw.btcPrice),
     ethPrice: toNumber(raw.ethPrice),
     solPrice: toNumber(raw.solPrice),

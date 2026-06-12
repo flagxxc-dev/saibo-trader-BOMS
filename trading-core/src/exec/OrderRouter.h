@@ -15,6 +15,7 @@
 #include <openssl/evp.h>
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
+#include <boost/json.hpp>
 
 namespace trading {
 namespace exec {
@@ -101,6 +102,16 @@ private:
 
     std::string generate_salt() const;
     std::string compute_hmac_signature(const std::string& timestamp, const std::string& method, const std::string& path, const std::string& body);
+    std::string authenticated_http_get(const std::string& target);
+    struct PolledFill {
+        bool ok = false;
+        std::string status;
+        double size_shares = 0.0;
+        double price = 0.0;
+    };
+    PolledFill poll_order_fill(const std::string& order_id, double fallback_price, double requested_shares);
+    std::string extract_order_id(const boost::json::object& obj) const;
+    double parse_matched_size(const boost::json::value& raw) const;
     std::string base64_encode(const unsigned char* input, int length);
     std::vector<unsigned char> base64_decode(const std::string& input);
     int calc_decode_length(const std::string& b64input);

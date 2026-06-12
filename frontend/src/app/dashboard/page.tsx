@@ -7,6 +7,7 @@ import { GlassCard, CardContent, CardHeader, CardTitle } from "@/components/shar
 import { BinancePriceChart } from "@/components/dashboard/BinancePriceChart";
 import { PmMarketPanel } from "@/components/dashboard/PmMarketPanel";
 import { TradingPanels } from "@/components/dashboard/TradingPanels";
+import { PreflightBanner } from "@/components/dashboard/PreflightBanner";
 import { useLiveState } from "@/hooks/useLiveState";
 import { coreStatusLabel } from "@/lib/coreStatus";
 import { Activity, DollarSign, Briefcase, Percent, TrendingUp } from "lucide-react";
@@ -22,79 +23,77 @@ export default function DashboardPage() {
 
   const pnlColor = liveState.totalPnl >= 0 ? "text-emerald-400" : "text-red-400";
   const coreStatus = coreStatusLabel(liveState.status);
-  const showPm = true;
-  const showBinance = liveState.binanceFeedEnabled;
 
   return (
     <DashboardLayout>
-      <PageContainer>
+      <PageContainer className="space-y-5">
         <PageHeader
           title="仪表盘"
-          description="实时行情、持仓与成交流水。"
+          description="DH 结构对冲 · 实时行情、持仓与成交流水。"
           icon={Activity}
         />
 
+        <PreflightBanner />
+
         {liveState.isPaperMode && (
-          <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-[13px] text-amber-200">
-            📋 <strong>纸面交易模式</strong> — 以下为纸面数据，不会动用真实资金。机制与实盘一致：策略信号已扣除约 {(liveState.feeRate * 100).toFixed(1)}% 手续费边际，开仓/平仓时从余额扣减 taker 费。
+          <div className="rounded-lg border border-amber-500/25 bg-amber-500/8 px-4 py-2.5 text-[13px] text-amber-100/90">
+            📋 <strong>纸面交易模式</strong> — 以下为纸面数据，不会动用真实资金。策略信号已按
+            {liveState.useDynamicFees ? " Polymarket V2 动态费率曲线" : ` 约 ${(liveState.feeRate * 100).toFixed(1)}% 扁平费率`}
+            扣除手续费边际，开仓/平仓时从余额扣减 taker 费。
           </div>
         )}
 
-        <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-4 mb-5">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <GlassCard>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-[11px] font-medium tracking-widest uppercase text-white/40">总余额</CardTitle>
-              <DollarSign className="h-4 w-4 text-white/20" />
+              <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">总余额</CardTitle>
+              <DollarSign className="h-4 w-4 text-amber-400/50" />
             </CardHeader>
             <CardContent className="pb-4">
-              <div className="text-2xl font-mono font-extrabold tracking-tighter text-white">
-                ${liveState.balance.toFixed(2)}
-              </div>
-              <p className={`text-xs font-mono mt-3 ${pnlColor}`}>
+              <div className="text-2xl font-mono font-bold tracking-tight">${liveState.balance.toFixed(2)}</div>
+              <p className={`text-xs font-mono mt-2 ${pnlColor}`}>
                 累计盈亏 {liveState.totalPnl >= 0 ? "+" : ""}${liveState.totalPnl.toFixed(2)}
-                <span className="text-white/30 ml-2">今日 {liveState.dailyPnl >= 0 ? "+" : ""}${liveState.dailyPnl.toFixed(2)}</span>
+                <span className="text-muted-foreground ml-2">
+                  今日 {liveState.dailyPnl >= 0 ? "+" : ""}${liveState.dailyPnl.toFixed(2)}
+                </span>
               </p>
             </CardContent>
           </GlassCard>
 
           <GlassCard>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-[11px] font-medium tracking-widest uppercase text-white/40">持仓数量</CardTitle>
-              <Briefcase className="h-4 w-4 text-white/20" />
+              <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">持仓数量</CardTitle>
+              <Briefcase className="h-4 w-4 text-amber-400/50" />
             </CardHeader>
             <CardContent className="pb-4">
-              <div className="text-2xl font-mono font-extrabold tracking-tighter text-white">
-                {liveState.openPositions}
-              </div>
-              <p className="text-xs text-white/40 mt-3">
-                累计成交 {liveState.totalDhTrades} 笔
-              </p>
+              <div className="text-2xl font-mono font-bold tracking-tight">{liveState.openPositions}</div>
+              <p className="text-xs text-muted-foreground mt-2">累计 DH 成交 {liveState.totalDhTrades} 笔</p>
             </CardContent>
           </GlassCard>
 
           <GlassCard>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-[11px] font-medium tracking-widest uppercase text-white/40">胜率</CardTitle>
-              <Percent className="h-4 w-4 text-white/20" />
+              <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">胜率</CardTitle>
+              <Percent className="h-4 w-4 text-amber-400/50" />
             </CardHeader>
             <CardContent className="pb-4">
-              <div className="text-2xl font-mono font-extrabold tracking-tighter text-white">
+              <div className="text-2xl font-mono font-bold tracking-tight">
                 {(Math.min(liveState.winRate, 1) * 100).toFixed(1)}%
               </div>
-              <p className="text-xs text-white/40 mt-3">历史平仓胜率</p>
+              <p className="text-xs text-muted-foreground mt-2">历史平仓胜率</p>
             </CardContent>
           </GlassCard>
 
           <GlassCard>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-[11px] font-medium tracking-widest uppercase text-white/40">核心状态</CardTitle>
-              <TrendingUp className="h-4 w-4 text-emerald-400/60" />
+              <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">核心状态</CardTitle>
+              <TrendingUp className="h-4 w-4 text-amber-400/60" />
             </CardHeader>
             <CardContent className="pb-4">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
                 <span className="relative flex h-2 w-2">
                   {coreStatus.pulse && (
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
                   )}
                   <span
                     className={`relative inline-flex rounded-full h-2 w-2 ${
@@ -102,30 +101,30 @@ export default function DashboardPage() {
                     }`}
                   />
                 </span>
-                <span className={`text-2xl font-mono font-extrabold tracking-tighter ${coreStatus.color}`}>
-                  {coreStatus.text}
-                </span>
+                <span className={`text-xl font-mono font-bold ${coreStatus.color}`}>{coreStatus.text}</span>
               </div>
               {liveState.statusReason && (
-                <p className="text-[10px] text-white/35 mt-2 font-mono leading-relaxed line-clamp-2" title={liveState.statusReason}>
+                <p
+                  className="text-[10px] text-muted-foreground mt-2 font-mono leading-relaxed line-clamp-2"
+                  title={liveState.statusReason}
+                >
                   {liveState.statusReason}
                 </p>
               )}
-              <p className="text-xs text-white/30 mt-3 font-mono">
+              <p className="text-[10px] text-muted-foreground mt-2 font-mono">
                 更新：{mounted ? new Date(liveState.timestamp || Date.now()).toLocaleTimeString("zh-CN") : "--:--:--"}
               </p>
             </CardContent>
           </GlassCard>
         </div>
 
-        {showPm && (
-          <div className="mb-4 rounded-xl border border-indigo-500/25 bg-indigo-500/10 px-4 py-2.5 text-[13px] text-indigo-100/90">
-            <strong>DH 模式</strong> — 开仓看 Polymarket YES+NO 合价（目标 ≤ {liveState.dhSumTarget.toFixed(2)}）；上方 Binance 走势仅作参考，与是否开仓无关。
-          </div>
-        )}
+        <div className="rounded-lg border border-violet-500/20 bg-violet-500/8 px-4 py-2.5 text-[13px] text-violet-100/90">
+          <strong>DH 模式</strong> — 开仓看 YES+NO 合价（目标 ≤ {liveState.dhSumTarget.toFixed(2)}）；Binance
+          走势仅作参考，与是否开仓无关。
+        </div>
 
-        <div className="mb-5 space-y-5">
-          {showBinance && (
+        <div className="space-y-5">
+          {liveState.binanceFeedEnabled && (
             <BinancePriceChart
               btcPrice={liveState.btcPrice}
               ethPrice={liveState.ethPrice}
@@ -133,16 +132,14 @@ export default function DashboardPage() {
               timestamp={liveState.timestamp}
             />
           )}
-          {showPm && (
-            <PmMarketPanel
-              opportunities={liveState.dhOpportunities}
-              dhSumTarget={liveState.dhSumTarget}
-              dhMinDiscount={liveState.dhMinDiscount}
-              feeRate={liveState.feeRate}
-              timestamp={liveState.timestamp}
-              marketsScanned={liveState.marketsScanned}
-            />
-          )}
+          <PmMarketPanel
+            opportunities={liveState.dhOpportunities}
+            dhSumTarget={liveState.dhSumTarget}
+            dhMinDiscount={liveState.dhMinDiscount}
+            feeRate={liveState.feeRate}
+            timestamp={liveState.timestamp}
+            marketsScanned={liveState.marketsScanned}
+          />
         </div>
 
         <TradingPanels liveState={liveState} />

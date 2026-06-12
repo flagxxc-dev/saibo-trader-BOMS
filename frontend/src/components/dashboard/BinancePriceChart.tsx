@@ -68,7 +68,7 @@ export function BinancePriceChart({ btcPrice, ethPrice, solPrice, timestamp }: B
         <div className="flex items-center justify-between flex-wrap gap-2">
           <CardTitle className="font-heading text-lg font-semibold tracking-tight text-gradient flex items-center gap-2">
             <LineChart className="h-4 w-4" />
-            现货走势（Binance）
+            现货走势
           </CardTitle>
           <div className="flex gap-4 text-[11px] font-mono text-white/40">
             <span>BTC <span className="text-indigo-300">{btcPrice > 0 ? btcPrice.toFixed(2) : "—"}</span></span>
@@ -76,7 +76,7 @@ export function BinancePriceChart({ btcPrice, ethPrice, solPrice, timestamp }: B
             <span>SOL <span className="text-teal-400">{solPrice > 0 ? solPrice.toFixed(2) : "—"}</span></span>
           </div>
         </div>
-        <p className="text-[11px] text-white/35 mt-2">仅用于仪表盘展示，与 DH 开仓逻辑无关。</p>
+        <p className="text-[11px] text-muted-foreground mt-2">仪表盘展示用，与 DH 开仓逻辑无关。</p>
       </CardHeader>
       <CardContent>
         <div ref={chartContainerRef} className="w-full h-[280px]" />

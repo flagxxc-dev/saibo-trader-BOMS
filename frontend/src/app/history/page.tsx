@@ -66,13 +66,13 @@ export default function HistoryPage() {
       <PageContainer>
         <PageHeader
           title="交易历史"
-          description="结构化成交记录：入场/出场价、份额、手续费与盈亏。按 5m / 15m 窗口区分。"
+          description="DH 结构化成交记录：入场/出场价、份额、手续费与盈亏。按 5m / 15m 窗口区分。"
           icon={History}
         />
 
         {liveState.isPaperMode && (
-          <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-[13px] text-amber-200">
-            当前为<strong>纸面模式</strong>。记录会写入 <code className="text-amber-100/90">logs/paper_state.json</code>，重启 bot 后保留。
+          <div className="mb-4 rounded-lg border border-amber-500/25 bg-amber-500/8 px-4 py-2.5 text-[13px] text-amber-100/90">
+            当前为<strong>纸面模式</strong>。记录写入本地状态文件，重启 bot 后保留。
           </div>
         )}
 

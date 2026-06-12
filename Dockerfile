@@ -47,14 +47,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY dashboard_bridge.py derive_and_update_keys.py derive_keys.py fetch_balance.py redeem_positions.py cli_dashboard.py test_auth.py ./
+COPY dashboard_bridge.py bot_config.py derive_and_update_keys.py derive_keys.py fetch_balance.py redeem_positions.py cli_dashboard.py test_auth.py live_preflight.py polymarket_fees.py start_bot.py status_bot.py ./
 COPY --from=cpp-builder /src/trading-core/build/trading-core ./build/trading-core
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh \
  && chmod +x /entrypoint.sh \
  && mkdir -p /app/logs
 
-EXPOSE 8080
+EXPOSE 8080 8081
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD python3 -c "import socket; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',8080)); s.close()"
 
