@@ -19,10 +19,23 @@ export BOT_API_URL="${BOT_API_URL:-http://127.0.0.1:8081}"
 export PORT="${PORT:-3001}"
 export HOSTNAME=0.0.0.0
 export NEXTAUTH_URL="${NEXTAUTH_URL:-http://127.0.0.1:3001}"
-export NEXTAUTH_SECRET="${NEXTAUTH_SECRET:-change-me-in-production}"
+if [ -z "${NEXTAUTH_SECRET:-}" ] || [ "${NEXTAUTH_SECRET}" = "change-me-in-production" ]; then
+  NEXTAUTH_SECRET="$(openssl rand -hex 32 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(32))')"
+fi
+export NEXTAUTH_SECRET
 export AUTH_USERNAME="${AUTH_USERNAME:-admin}"
 export AUTH_PASSWORD="${AUTH_PASSWORD:-admin}"
 export AUTH_TRUST_HOST=true
+# Persist secret for restarts (web.env is gitignored on server)
+if [ -f "$ROOT/web.env" ]; then
+  if grep -q '^NEXTAUTH_SECRET=' "$ROOT/web.env"; then
+    sed -i "s/^NEXTAUTH_SECRET=.*/NEXTAUTH_SECRET=${NEXTAUTH_SECRET}/" "$ROOT/web.env"
+  else
+    echo "NEXTAUTH_SECRET=${NEXTAUTH_SECRET}" >> "$ROOT/web.env"
+  fi
+else
+  printf 'NEXTAUTH_SECRET=%s\nAUTH_TRUST_HOST=true\n' "$NEXTAUTH_SECRET" > "$ROOT/web.env"
+fi
 
 npm ci --no-audit --no-fund
 npx prisma generate

@@ -189,12 +189,17 @@ def main() -> int:
             return 0
 
         if mode == "set-auth":
+            import secrets
+
             user = sys.argv[2] if len(sys.argv) > 2 else "zhan"
             password = sys.argv[3] if len(sys.argv) > 3 else "qilai"
+            secret = secrets.token_hex(32)
             web_env = (
                 f"AUTH_USERNAME={user}\n"
                 f"AUTH_PASSWORD={password}\n"
                 f"NEXTAUTH_URL=http://{HOST}:3001\n"
+                f"NEXTAUTH_SECRET={secret}\n"
+                f"AUTH_TRUST_HOST=true\n"
             )
             sftp = client.open_sftp()
             with sftp.file(f"{PROJ}/web.env", "w") as f:
