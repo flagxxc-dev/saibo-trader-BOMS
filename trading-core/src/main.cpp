@@ -556,9 +556,12 @@ int main() {
         std::string verifying_contract = V2_EXCHANGE;
 
         bool auto_redeem = !paper_mode && env_flag_true(env, "AUTO_REDEEM", true);
+        bool live_dh_dry_run = !paper_mode && env_flag_true(env, "LIVE_DH_DRY_RUN", false);
 
-        spdlog::info("Starting Core v3.0 (DH-only) | Mode: {} | Bal: ${:.2f} | Auto-redeem: {}",
-                     paper_mode ? "PAPER" : "LIVE", starting_balance, auto_redeem ? "on" : "off");
+        spdlog::info("Starting Core v3.0 (DH-only) | Mode: {} | Bal: ${:.2f} | Auto-redeem: {} | DH dry-run: {}",
+                     paper_mode ? "PAPER" : "LIVE", starting_balance,
+                     auto_redeem ? "on" : "off",
+                     live_dh_dry_run ? "on" : "off");
 
         boost::asio::io_context feed_ioc;
         boost::asio::ssl::context feed_ctx{boost::asio::ssl::context::sslv23_client};
@@ -650,7 +653,7 @@ int main() {
         store.set_dh_asset_enabled(15, "eth", env_flag_true(env, "DH_ENABLE_15M_ETH", true));
         store.set_binance_feed_enabled(binance_feed_enabled);
 
-        exec::OrderRouter router(feed_ioc, feed_ctx, store, risk_manager, polymarket_host, polymarket_chain_id, verifying_contract, polymarket_pk, polymarket_signer, polymarket_funder, paper_mode, poly_api_key, poly_api_secret, poly_api_passphrase, neg_risk_exchange);
+        exec::OrderRouter router(feed_ioc, feed_ctx, store, risk_manager, polymarket_host, polymarket_chain_id, verifying_contract, polymarket_pk, polymarket_signer, polymarket_funder, paper_mode, poly_api_key, poly_api_secret, poly_api_passphrase, neg_risk_exchange, live_dh_dry_run);
 
         GammaClient gamma(gamma_ioc, gamma_ctx);
         std::shared_ptr<BinanceFeed> btc_feed;

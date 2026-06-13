@@ -192,6 +192,7 @@ updates = {{
     "DH_ENABLE_15M_BTC": "false",
     "DH_ENABLE_15M_ETH": "false",
     "AUTO_REDEEM": "true",
+    "LIVE_DH_DRY_RUN": "true",
     "PAPER_STATE_PERSIST": "false",
     "LIVE_STARTING_BALANCE": "21.077149",
 }}
@@ -244,6 +245,34 @@ print("patched", len(updates), "keys")
                 if r != 0 and "derive_and_update_keys" in step:
                     rc = r
                 if r != 0 and "preflight-only" in step:
+                    return r
+            return rc
+
+        if mode == "shadow-dh":
+            # Pull latest, enable LIVE_DH_DRY_RUN, rebuild core, restart (no real orders).
+            bot_sh = ROOT / "scripts" / "server_start_bot.sh"
+            remote_bot = f"{PROJ}/server_start_bot.sh"
+            sftp = client.open_sftp()
+            sftp.put(str(bot_sh), remote_bot)
+            sftp.close()
+            steps = [
+                f"cd '{PROJ}' && git pull origin main",
+                f"grep -q '^LIVE_DH_DRY_RUN=' '{PROJ}/.env' && "
+                f"sed -i 's/^LIVE_DH_DRY_RUN=.*/LIVE_DH_DRY_RUN=true/' '{PROJ}/.env' || "
+                f"echo 'LIVE_DH_DRY_RUN=true' >> '{PROJ}/.env'",
+                f"grep -E '^(PAPER_MODE|LIVE_DH_DRY_RUN|RISK_MAX)' '{PROJ}/.env' | head -6",
+                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                f"chmod +x '{remote_bot}' && bash '{remote_bot}'",
+                "sleep 10",
+                "pgrep -af 'start_bot|trading-core' || true",
+                f"grep -E 'LIVE DH|SHADOW|Dry-run|Mode: LIVE' '{PROJ}/bot.log' | tail -20",
+            ]
+            rc = 0
+            for step in steps:
+                r = run(client, step, timeout=3600)
+                if r != 0 and "git pull" in step:
+                    rc = r
+                if r != 0 and "./build.sh" in step:
                     return r
             return rc
 

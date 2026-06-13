@@ -26,6 +26,12 @@ struct LegFillResult {
     double size_shares = 0.0;
 };
 
+struct BookAskInfo {
+    bool ok = false;
+    double best_ask = 0.0;
+    double depth_shares = 0.0;
+};
+
 class OrderRouter {
 public:
     OrderRouter(boost::asio::io_context& ioc, 
@@ -42,7 +48,8 @@ public:
                 const std::string& api_key = "",
                 const std::string& api_secret = "",
                 const std::string& api_passphrase = "",
-                const std::string& neg_risk_exchange = "");
+                const std::string& neg_risk_exchange = "",
+                bool live_dh_dry_run = false);
 
     ~OrderRouter();
 
@@ -73,6 +80,7 @@ private:
     std::string signer_address_;
     std::string funder_address_;
     bool paper_mode_;
+    bool live_dh_dry_run_;
     std::string api_key_;
     std::string api_secret_;
     std::string api_passphrase_;
@@ -100,6 +108,10 @@ private:
 
     LegFillResult execute_dh_leg_buy(const std::string& token_id, double price, double size_shares, bool is_neg_risk);
     LegFillResult execute_unwind_sell(const std::string& token_id, double price, double size_shares, bool is_neg_risk);
+
+    std::optional<boost::json::object> fetch_book_object(const std::string& token_id);
+    BookAskInfo parse_book_asks(const boost::json::object& book) const;
+    BookAskInfo fetch_book_ask_info(const std::string& token_id);
 
     EIP712Signer& pick_signer(bool is_neg_risk) const;
 
