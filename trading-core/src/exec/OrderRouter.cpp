@@ -415,7 +415,7 @@ bool OrderRouter::submit_dump_hedge_order(const DumpHedgeSignal& signal, double 
     double filled_shares = std::min(yes_fill.size_shares, no_fill.size_shares);
     double combined_price = yes_fill.price + no_fill.price;
     double combined_cost = yes_fill.price * filled_shares + no_fill.price * filled_shares;
-    double fee_per_share = store_.compute_dh_entry_fee_per_share(
+    fee_per_share = store_.compute_dh_entry_fee_per_share(
         yes_fill.price, no_fill.price, signal.yes_token_id, signal.no_token_id);
     double entry_fees = fee_per_share * filled_shares;
     double locked_profit = (1.0 - combined_price) * filled_shares - entry_fees;
