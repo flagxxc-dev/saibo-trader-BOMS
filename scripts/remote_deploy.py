@@ -256,6 +256,7 @@ print("patched", len(updates), "keys")
             sftp.put(str(bot_sh), remote_bot)
             sftp.close()
             steps = [
+                f"cd '{PROJ}' && git stash push -m deploy-sync || true",
                 f"cd '{PROJ}' && git pull origin main",
                 f"grep -q '^LIVE_DH_DRY_RUN=' '{PROJ}/.env' && "
                 f"sed -i 's/^LIVE_DH_DRY_RUN=.*/LIVE_DH_DRY_RUN=true/' '{PROJ}/.env' || "

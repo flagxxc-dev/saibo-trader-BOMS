@@ -376,21 +376,19 @@ bool OrderRouter::submit_dump_hedge_order(const DumpHedgeSignal& signal, double 
         return false;
     }
 
-    double combined_cost = exec_combined * size_shares;
-    double entry_fees = fee_per_share * size_shares;
-    double locked_profit = exec_discount * size_shares;
-
     if (live_dh_dry_run_) {
+        const double shadow_cost = exec_combined * size_shares;
+        const double shadow_locked = exec_discount * size_shares;
         spdlog::info(
             "[LIVE DH SHADOW] WOULD OPEN | {} {}m | YES@{:.4f} NO@{:.4f} SUM:{:.4f} | "
             "{:.2f} shares | cost ${:.2f} | locked ${:.2f} | WS drift YES:{:+.4f} NO:{:+.4f}",
             signal.asset, signal.market.window_minutes,
             exec_yes, exec_no, exec_combined,
-            size_shares, combined_cost, locked_profit,
+            size_shares, shadow_cost, shadow_locked,
             exec_yes - signal.yes_price, exec_no - signal.no_price);
         store_.push_telemetry(fmt::format(
             "[DH SHADOW] {} | book sum {:.4f} | {:.2f} sh | locked ${:.2f} | no order sent",
-            signal.asset, exec_combined, size_shares, locked_profit));
+            signal.asset, exec_combined, size_shares, shadow_locked));
         return false;
     }
 
