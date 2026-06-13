@@ -22,6 +22,8 @@ namespace {
 constexpr double kMinLegUsdc = 1.0;
 constexpr double kFloatTol = 1e-6;
 constexpr double kMinFillShares = 0.01;
+constexpr double kDepthFillRatio = 0.90;
+constexpr double kMaxAskPriceSlack = 1.02;
 
 bool leg_meets_minimum(double price, double size_shares) {
     return price > 0.0 && size_shares * price >= kMinLegUsdc - kFloatTol;
@@ -105,8 +107,8 @@ bool OrderRouter::submit_order(const std::string& token_id, double price, double
     }
 }
 
-bool OrderRouter::check_book_depth(const std::string& token_id, double price, double size_shares) {
-    if (price <= 0.0 || size_shares <= 0.0) return false;
+double OrderRouter::query_ask_depth_shares(const std::string& token_id, double price) {
+    if (price <= 0.0) return -1.0;
 
     namespace beast = boost::beast;
     namespace http = beast::http;
@@ -119,7 +121,7 @@ bool OrderRouter::check_book_depth(const std::string& token_id, double price, do
 
         boost::asio::ip::tcp::resolver resolver(ioc_);
         beast::ssl_stream<beast::tcp_stream> stream(ioc_, ctx_);
-        if (!SSL_set_tlsext_host_name(stream.native_handle(), host.c_str())) return false;
+        if (!SSL_set_tlsext_host_name(stream.native_handle(), host.c_str())) return -1.0;
         auto const results = resolver.resolve(host, "443");
         beast::get_lowest_layer(stream).connect(results);
         stream.handshake(boost::asio::ssl::stream_base::client);
@@ -135,14 +137,14 @@ bool OrderRouter::check_book_depth(const std::string& token_id, double price, do
         beast::error_code ec;
         stream.shutdown(ec);
 
-        if (res.result() != http::status::ok) return false;
+        if (res.result() != http::status::ok) return -1.0;
 
         auto jv = boost::json::parse(res.body());
         auto obj = jv.as_object();
-        if (!obj.contains("asks") || !obj.at("asks").is_array()) return false;
+        if (!obj.contains("asks") || !obj.at("asks").is_array()) return -1.0;
 
         double shares_available = 0.0;
-        const double max_price = price * 1.02;
+        const double max_price = price * kMaxAskPriceSlack;
         for (const auto& level_v : obj.at("asks").as_array()) {
             if (!level_v.is_object()) continue;
             const auto& level = level_v.as_object();
@@ -153,11 +155,18 @@ bool OrderRouter::check_book_depth(const std::string& token_id, double price, do
                 shares_available += s;
             }
         }
-        return shares_available >= size_shares * 0.90;
+        return shares_available;
     } catch (const std::exception& e) {
-        spdlog::warn("check_book_depth failed for {}: {}", token_id.substr(0, 12), e.what());
-        return false;
+        spdlog::warn("query_ask_depth_shares failed for {}: {}", token_id.substr(0, 12), e.what());
+        return -1.0;
     }
+}
+
+bool OrderRouter::check_book_depth(const std::string& token_id, double price, double size_shares) {
+    if (size_shares <= 0.0) return false;
+    double available = query_ask_depth_shares(token_id, price);
+    if (available < 0.0) return false;
+    return available >= size_shares * kDepthFillRatio;
 }
 
 LegFillResult OrderRouter::execute_dh_leg_buy(const std::string& token_id, double price, double size_shares, bool is_neg_risk) {
@@ -241,9 +250,49 @@ bool OrderRouter::submit_dump_hedge_order(const DumpHedgeSignal& signal, double 
 
     spdlog::info("[LIVE DH] Sequential dual-leg for {} (neg_risk={})", signal.asset, is_neg_risk);
 
-    if (!check_book_depth(signal.yes_token_id, signal.yes_price, size_shares) ||
-        !check_book_depth(signal.no_token_id, signal.no_price, size_shares)) {
-        spdlog::error("[LIVE DH] Insufficient book depth for {} — aborting.", signal.asset);
+    double yes_ask = query_ask_depth_shares(signal.yes_token_id, signal.yes_price);
+    double no_ask = query_ask_depth_shares(signal.no_token_id, signal.no_price);
+    if (yes_ask < 0.0 || no_ask < 0.0) {
+        spdlog::error("[LIVE DH] Failed to query book depth for {} — aborting.", signal.asset);
+        return false;
+    }
+
+    const double min_order_usdc = risk_manager_.get_min_order_size();
+    double try_shares = size_shares;
+    if (yes_ask + kFloatTol < size_shares * kDepthFillRatio ||
+        no_ask + kFloatTol < size_shares * kDepthFillRatio) {
+        const double max_by_book = std::min(yes_ask, no_ask) / kDepthFillRatio;
+        try_shares = std::min(size_shares, max_by_book);
+        spdlog::info(
+            "[LIVE DH] Depth resize {} | {:.2f} -> {:.2f} shares | yes_ask={:.2f} no_ask={:.2f}",
+            signal.asset, size_shares, try_shares, yes_ask, no_ask);
+    }
+
+    while (try_shares >= kMinFillShares) {
+        const double combined_cost = try_shares * signal.combined_price;
+        if (combined_cost + kFloatTol < min_order_usdc) {
+            spdlog::warn(
+                "[LIVE DH] Depth allows {:.2f} shares but ${:.2f} < MIN_ORDER ${:.2f} for {} — aborting.",
+                try_shares, combined_cost, min_order_usdc, signal.asset);
+            return false;
+        }
+        if (!leg_meets_minimum(signal.yes_price, try_shares) ||
+            !leg_meets_minimum(signal.no_price, try_shares)) {
+            spdlog::warn("[LIVE DH] Resized {:.2f} shares below leg minimum for {} — aborting.", try_shares, signal.asset);
+            return false;
+        }
+        if (yes_ask + kFloatTol >= try_shares * kDepthFillRatio &&
+            no_ask + kFloatTol >= try_shares * kDepthFillRatio) {
+            size_shares = try_shares;
+            break;
+        }
+        try_shares *= 0.5;
+    }
+
+    if (try_shares < kMinFillShares) {
+        spdlog::error(
+            "[LIVE DH] Insufficient book depth for {} — aborting (yes_ask={:.2f} no_ask={:.2f}).",
+            signal.asset, yes_ask, no_ask);
         return false;
     }
 

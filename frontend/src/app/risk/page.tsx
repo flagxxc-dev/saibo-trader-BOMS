@@ -119,7 +119,7 @@ export default function RiskPage() {
           <CardHeader>
             <CardTitle className="font-heading text-lg font-semibold tracking-tight text-gradient">单笔最大仓位比例</CardTitle>
             <CardDescription className="text-white/40 text-[13px] leading-relaxed">
-              单笔 DH 可占用的最大账户余额百分比（当前约 ${(live.balance * live.riskMaxPositionFraction).toFixed(2)}）。
+              单笔 DH 可占用的最大账户余额百分比（当前约 ${(live.balance * live.riskMaxPositionFraction).toFixed(2)}）。可调范围 1%–90%。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -127,7 +127,14 @@ export default function RiskPage() {
               <Label className="text-white/90 font-medium text-[14px]">数值</Label>
               <span className="font-mono text-2xl font-semibold text-white">{sliderScalar(maxPosition, 8)}%</span>
             </div>
-            <Slider value={maxPosition} onValueChange={(val) => setMaxPosition(toSliderArray(val))} max={50} step={1} className="py-4" />
+            <Slider
+              value={maxPosition}
+              onValueChange={(val) => setMaxPosition(toSliderArray(val))}
+              min={1}
+              max={90}
+              step={1}
+              className="py-4"
+            />
           </CardContent>
         </GlassCard>
 

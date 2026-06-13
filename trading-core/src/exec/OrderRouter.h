@@ -54,6 +54,9 @@ public:
 
     bool check_book_depth(const std::string& token_id, double price, double size_shares);
 
+    // Sum of ask sizes at or below price * 1.02; -1 on fetch/parse failure.
+    double query_ask_depth_shares(const std::string& token_id, double price);
+
     // Returns true if a DH position was opened (paper or live).
     bool submit_dump_hedge_order(const DumpHedgeSignal& signal, double size_shares);
 

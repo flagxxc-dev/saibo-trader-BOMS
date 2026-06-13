@@ -155,6 +155,98 @@ def main() -> int:
                 run(client, step, timeout=300)
             return 0
 
+        if mode == "server-paper":
+            # Revert server to paper only (does NOT touch local .env).
+            bot_sh = ROOT / "scripts" / "server_start_bot.sh"
+            remote_bot = f"{PROJ}/server_start_bot.sh"
+            sftp = client.open_sftp()
+            sftp.put(str(bot_sh), remote_bot)
+            sftp.close()
+            steps = [
+                f"sed -i 's/^PAPER_MODE=.*/PAPER_MODE=true/' '{PROJ}/.env'",
+                f"grep -E '^(PAPER_MODE|RISK_MAX)' '{PROJ}/.env' | head -5",
+                f"chmod +x '{remote_bot}' && bash '{remote_bot}'",
+                "sleep 8",
+                "pgrep -af 'start_bot|trading-core' || true",
+                f"tail -n 12 '{PROJ}/logs/bridge.log' 2>/dev/null || true",
+            ]
+            for step in steps:
+                run(client, step, timeout=180)
+            return 0
+
+        if mode == "go-live-small":
+            # Server-only small live: patch server .env (does NOT upload local .env).
+            patch_py = f"""import shutil
+from pathlib import Path
+P = Path("{PROJ}/.env")
+updates = {{
+    "PAPER_MODE": "false",
+    "RISK_MAX_POSITION_FRACTION": "0.35",
+    "RISK_MAX_CONCURRENT_POSITIONS": "1",
+    "MIN_ORDER_SIZE": "5.0",
+    "DH_ENABLE_5M": "true",
+    "DH_ENABLE_15M": "false",
+    "DH_ENABLE_5M_BTC": "true",
+    "DH_ENABLE_5M_ETH": "false",
+    "DH_ENABLE_5M_SOL": "false",
+    "DH_ENABLE_15M_BTC": "false",
+    "DH_ENABLE_15M_ETH": "false",
+    "AUTO_REDEEM": "true",
+    "PAPER_STATE_PERSIST": "false",
+    "LIVE_STARTING_BALANCE": "21.077149",
+}}
+shutil.copy2(P, str(P) + ".pre-live-small.bak")
+lines = P.read_text(encoding="utf-8").splitlines()
+done = set()
+out = []
+for line in lines:
+    s = line.strip()
+    if s and not s.startswith("#") and "=" in line:
+        k = line.split("=", 1)[0].strip()
+        if k in updates:
+            out.append(f"{{k}}={{updates[k]}}")
+            done.add(k)
+            continue
+    out.append(line)
+for k, v in updates.items():
+    if k not in done:
+        out.append(f"{{k}}={{v}}")
+P.write_text("\\n".join(out) + "\\n", encoding="utf-8")
+print("patched", len(updates), "keys")
+"""
+            bot_sh = ROOT / "scripts" / "server_start_bot.sh"
+            remote_bot = f"{PROJ}/server_start_bot.sh"
+            sftp = client.open_sftp()
+            sftp.put(str(bot_sh), remote_bot)
+            with sftp.file(f"{PROJ}/_patch_live_small.py", "w") as f:
+                f.write(patch_py)
+            sftp.close()
+            steps = [
+                f"test -f '{PROJ}/logs/paper_state.json' && "
+                f"cp '{PROJ}/logs/paper_state.json' '{PROJ}/logs/paper_state.json.pre-live.bak' || true",
+                f"cd '{PROJ}' && .venv/bin/python _patch_live_small.py",
+                f"grep -E '^(PAPER_MODE|RISK_|MIN_ORDER|DH_ENABLE|AUTO_REDEEM)' '{PROJ}/.env'",
+                f"cd '{PROJ}' && .venv/bin/python derive_and_update_keys.py",
+                f"grep -E '^POLY_API' '{PROJ}/.env' | sed "
+                "'s/POLY_API_SECRET=.*/POLY_API_SECRET=***MASKED***/;"
+                "s/POLY_PASSPHRASE=.*/POLY_PASSPHRASE=***MASKED***/;"
+                "s/POLY_API_KEY=.*/POLY_API_KEY=***SET***/'",
+                f"cd '{PROJ}' && .venv/bin/python fetch_balance.py",
+                f"cd '{PROJ}' && .venv/bin/python start_bot.py --preflight-only",
+                f"chmod +x '{remote_bot}' && bash '{remote_bot}'",
+                "sleep 10",
+                "pgrep -af 'start_bot|trading-core' || true",
+                f"tail -n 30 '{PROJ}/logs/bot.log' 2>/dev/null || tail -n 30 '{PROJ}/logs/bridge.log'",
+            ]
+            rc = 0
+            for step in steps:
+                r = run(client, step, timeout=300)
+                if r != 0 and "derive_and_update_keys" in step:
+                    rc = r
+                if r != 0 and "preflight-only" in step:
+                    return r
+            return rc
+
         if mode == "sync-env":
             local_env = ROOT / ".env"
             if not local_env.is_file():
