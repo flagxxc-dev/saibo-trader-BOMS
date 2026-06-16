@@ -60,6 +60,7 @@ def main() -> int:
         asset = str(t.get("asset") or "").upper()
         if asset == "—":
             asset = ""
+        asset = asset.lower() if asset else ""
         window = t.get("windowMinutes")
         if window not in (5, 15):
             window = None
@@ -68,6 +69,7 @@ def main() -> int:
 
             asset = asset or _infer_asset(title)
             window = window or _infer_window_minutes(title)
+        asset = (asset or "").lower()
         if not asset or asset == "—" or window not in (5, 15):
             continue
         leg = _outcome_side(str(t.get("outcome") or ""))

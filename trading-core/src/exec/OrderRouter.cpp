@@ -627,6 +627,36 @@ LegFillResult OrderRouter::execute_via_clob_bridge(
 
         if (res.result() != http::status::ok) {
             spdlog::error("[LIVE EXEC] Bridge REJECTED: {} | Body: {}", res.result_int(), res.body());
+            // Still try to parse body for order_id / fill hints.
+            try {
+                auto response_json = boost::json::parse(res.body()).as_object();
+                if (response_json.contains("order_id") && response_json.at("order_id").is_string()) {
+                    result.order_id = std::string(response_json.at("order_id").as_string());
+                }
+                if (response_json.contains("size_shares")) {
+                    const auto& sv = response_json.at("size_shares");
+                    if (sv.is_double()) result.size_shares = sv.as_double();
+                    else if (sv.is_int64()) result.size_shares = static_cast<double>(sv.as_int64());
+                }
+                if (response_json.contains("price")) {
+                    const auto& pv = response_json.at("price");
+                    if (pv.is_double()) result.price = pv.as_double();
+                    else if (pv.is_int64()) result.price = static_cast<double>(pv.as_int64());
+                }
+                if (response_json.contains("success") && response_json.at("success").as_bool()
+                    && result.size_shares > 0.0) {
+                    result.success = true;
+                    result.price = result.price > 0.0 ? result.price : price;
+                    if (!register_position) {
+                        spdlog::info("[LIVE EXEC] Bridge fill | {} | {:.4f} x {:.4f}",
+                                     asset, result.price, result.size_shares);
+                    }
+                    return result;
+                }
+                if (!result.order_id.empty()) {
+                    result.pending_fill = true;
+                }
+            } catch (...) {}
             return result;
         }
 
@@ -715,6 +745,69 @@ LegFillResult OrderRouter::execute_via_clob_bridge(
         spdlog::error("[LIVE EXEC] Bridge network error: {}", e.what());
         return result;
     }
+}
+
+LegFillResult OrderRouter::resolve_clob_fill(
+    const std::string& token_id,
+    double fallback_price,
+    const std::string& order_id,
+    uint8_t side) {
+    namespace beast = boost::beast;
+    namespace http = beast::http;
+
+    LegFillResult result;
+    boost::json::object body;
+    body["token_id"] = token_id;
+    body["price"] = fallback_price;
+    body["side"] = side == 0 ? "BUY" : "SELL";
+    if (!order_id.empty()) body["order_id"] = order_id;
+    const std::string payload = boost::json::serialize(body);
+
+    try {
+        std::lock_guard<std::mutex> lock(http_mutex_);
+        boost::asio::ip::tcp::resolver resolver(ioc_);
+        beast::tcp_stream stream(ioc_);
+        auto const results = resolver.resolve(clob_bridge_host_, std::to_string(clob_bridge_port_));
+        beast::get_lowest_layer(stream).connect(results);
+
+        http::request<http::string_body> req{http::verb::post, "/internal/clob/resolve", 11};
+        req.set(http::field::host, clob_bridge_host_);
+        req.set(http::field::user_agent, "PolymarketBot/1.0");
+        req.set(http::field::content_type, "application/json");
+        req.body() = payload;
+        req.prepare_payload();
+
+        http::write(stream, req);
+        beast::flat_buffer buffer;
+        http::response<http::string_body> res;
+        http::read(stream, buffer, res);
+        beast::error_code ec;
+        stream.socket().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
+
+        if (res.result() != http::status::ok) return result;
+        auto response_json = boost::json::parse(res.body()).as_object();
+        result.success = response_json.contains("success") && response_json.at("success").as_bool();
+        if (response_json.contains("order_id") && response_json.at("order_id").is_string()) {
+            result.order_id = std::string(response_json.at("order_id").as_string());
+        }
+        if (response_json.contains("price")) {
+            const auto& pv = response_json.at("price");
+            if (pv.is_double()) result.price = pv.as_double();
+        }
+        if (response_json.contains("size_shares")) {
+            const auto& sv = response_json.at("size_shares");
+            if (sv.is_double()) result.size_shares = sv.as_double();
+            else if (sv.is_int64()) result.size_shares = static_cast<double>(sv.as_int64());
+        }
+        if (result.success && result.size_shares > 0.0) {
+            result.pending_fill = false;
+            spdlog::info("[LIVE EXEC] Resolve fill | {:.4f} x {:.4f} order_id={}",
+                         result.price, result.size_shares, result.order_id);
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[LIVE EXEC] Resolve bridge error: {}", e.what());
+    }
+    return result;
 }
 
 LegFillResult OrderRouter::execute_rest_order(
@@ -1185,16 +1278,32 @@ bool OrderRouter::submit_lih_action(const trading::LegInAction& act, double now_
         }
 
         LegFillResult fill = execute_dh_leg_buy(tok, exec_px, shares, is_neg_risk);
+        if ((!fill.success || fill.size_shares < kMinFillShares) && use_python_clob_) {
+            LegFillResult resolved = resolve_clob_fill(tok, exec_px, fill.order_id, 0);
+            if (resolved.success && resolved.size_shares >= kMinFillShares) {
+                fill = resolved;
+            } else if (!fill.order_id.empty() && resolved.order_id.empty()) {
+                resolved.order_id = fill.order_id;
+            }
+            if (!fill.success && !resolved.order_id.empty()) {
+                fill.order_id = resolved.order_id;
+                fill.pending_fill = true;
+            }
+        }
         if (fill.pending_fill) {
-            risk_manager_.end_lih_leg1_inflight(act.market.asset, act.market.window_minutes);
-            spdlog::warn("[LIVE LIH] LEG1 uncertain fill {} order_id={} — released lock, run reconcile",
+            spdlog::warn("[LIVE LIH] LEG1 uncertain fill {} order_id={} — keeping in-flight lock",
                          act.market.asset, fill.order_id);
             store_.push_telemetry(fmt::format(
-                "[LIH LIVE] LEG1 uncertain {} | order_id={} — reconcile needed",
+                "[LIH LIVE] LEG1 pending {} | order_id={} — awaiting fill confirm",
                 act.market.asset, fill.order_id));
             return false;
         }
         if (!fill.success || fill.size_shares < kMinFillShares) {
+            if (!fill.order_id.empty()) {
+                spdlog::warn("[LIVE LIH] LEG1 unconfirmed {} order_id={} — keeping in-flight (no duplicate)",
+                             act.market.asset, fill.order_id);
+                return false;
+            }
             risk_manager_.end_lih_leg1_inflight(act.market.asset, act.market.window_minutes);
             spdlog::error("[LIVE LIH] LEG1 buy failed {} (filled {:.4f})",
                           act.market.asset, fill.size_shares);
@@ -1279,11 +1388,40 @@ bool OrderRouter::submit_lih_action(const trading::LegInAction& act, double now_
         }
 
         LegFillResult fill = execute_dh_leg_buy(tok, exec_px, shares, is_neg_risk);
-        if (!fill.success || fill.size_shares + kFloatTol < shares) {
+        if ((!fill.success || fill.size_shares < kMinFillShares) && use_python_clob_) {
+            LegFillResult resolved = resolve_clob_fill(tok, exec_px, fill.order_id, 0);
+            if (resolved.success && resolved.size_shares >= kMinFillShares) {
+                fill = resolved;
+            } else if (!fill.order_id.empty() && resolved.order_id.empty()) {
+                resolved.order_id = fill.order_id;
+            }
+            if (!fill.success && !resolved.order_id.empty()) {
+                fill.order_id = resolved.order_id;
+                fill.pending_fill = true;
+            }
+        }
+        if (fill.pending_fill) {
+            spdlog::warn("[LIVE LIH] {} uncertain fill {} order_id={} — keeping rebalance lock",
+                         tag, act.market.asset, fill.order_id);
+            store_.push_telemetry(fmt::format(
+                "[LIH LIVE] {} pending {} | order_id={} — awaiting fill confirm",
+                tag, act.market.asset, fill.order_id));
+            return false;
+        }
+        if (!fill.success || fill.size_shares < kMinFillShares) {
+            if (!fill.order_id.empty()) {
+                spdlog::warn("[LIVE LIH] {} unconfirmed {} order_id={} — keeping rebalance lock",
+                             tag, act.market.asset, fill.order_id);
+                return false;
+            }
             risk_manager_.end_lih_rebalance_inflight(act.lih_id);
             spdlog::error("[LIVE LIH] {} failed {} (filled {:.4f}/{:.4f})",
                           tag, act.market.asset, fill.size_shares, shares);
             return false;
+        }
+        if (fill.size_shares + kFloatTol < shares) {
+            spdlog::warn("[LIVE LIH] {} partial {:.2f}/{:.2f} {} — accepting fill",
+                         tag, fill.size_shares, shares, act.market.asset);
         }
         risk_manager_.register_lih_add_leg(act.lih_id, act.buy_yes, fill.price, fill.size_shares, false);
         store_.push_signal(fmt::format("LIH LIVE {} {} {} {:.2f}sh @ {:.4f} ({})",

@@ -32,7 +32,14 @@ export default function DashboardPage() {
   }, []);
 
   const pnlColor = liveState.totalPnl >= 0 ? "text-emerald-400" : "text-red-400";
-  const coreStatus = coreStatusLabel(liveState.status);
+  const coreStatus = coreStatusLabel(liveState.status, liveState.botStreamConnected);
+  const hasLiveWallet =
+    liveState.walletSource === "live" &&
+    liveState.realWalletBalance != null &&
+    liveState.realWalletBalance > 0;
+  const displayBalance = liveState.isPaperMode
+    ? liveState.balance
+    : liveState.realWalletBalance ?? liveState.balance;
 
   return (
     <DashboardLayout>
@@ -60,7 +67,23 @@ export default function DashboardPage() {
               <DollarSign className="h-4 w-4 text-amber-400/50" />
             </CardHeader>
             <CardContent className="pb-4">
-              <div className="text-2xl font-mono font-bold tracking-tight">${liveState.balance.toFixed(2)}</div>
+              <div className="text-2xl font-mono font-bold tracking-tight">${displayBalance.toFixed(2)}</div>
+              {liveState.isPaperMode && hasLiveWallet && (
+                <p className="text-xs text-muted-foreground mt-1 font-mono">
+                  真实钱包 ${liveState.realWalletBalance!.toFixed(2)}
+                  {(liveState.positionsValue ?? 0) > 0 && (
+                    <span> · 持仓市值 ${(liveState.positionsValue ?? 0).toFixed(2)}</span>
+                  )}
+                </p>
+              )}
+              {!liveState.isPaperMode && liveState.cashBalance != null && liveState.cashBalance > 0 && (
+                <p className="text-xs text-muted-foreground mt-1 font-mono">
+                  现金 ${liveState.cashBalance.toFixed(2)}
+                  {(liveState.positionsValue ?? 0) > 0 && (
+                    <span> · 持仓市值 ${(liveState.positionsValue ?? 0).toFixed(2)}</span>
+                  )}
+                </p>
+              )}
               <p className={`text-xs font-mono mt-2 ${pnlColor}`}>
                 累计盈亏 {liveState.totalPnl >= 0 ? "+" : ""}${liveState.totalPnl.toFixed(2)}
                 <span className="text-muted-foreground ml-2">

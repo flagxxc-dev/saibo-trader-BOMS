@@ -1604,12 +1604,62 @@ print("patched", len(updates), "keys")
                     return r
             return 0
 
+        if mode == "fix-build":
+            # Upload LIH reliability fixes, compile only — does NOT touch .env or start bot.
+            upload_files = [
+                "clob_live.py",
+                "dashboard_bridge.py",
+                "scripts/live_lih_reconcile.py",
+                "trading-core/src/exec/OrderRouter.cpp",
+                "trading-core/src/exec/OrderRouter.h",
+                "trading-core/src/risk/RiskManager.cpp",
+                "trading-core/src/risk/RiskManager.h",
+                "trading-core/src/main.cpp",
+            ]
+            sftp = client.open_sftp()
+            for rel in upload_files:
+                local = ROOT / rel
+                remote = f"{PROJ}/{rel.replace(chr(92), '/')}"
+                remote_parent = remote.rsplit("/", 1)[0]
+                parts: list[str] = []
+                for part in remote_parent.split("/"):
+                    if not part:
+                        continue
+                    parts.append(part)
+                    seg = "/" + "/".join(parts)
+                    try:
+                        sftp.stat(seg)
+                    except OSError:
+                        try:
+                            sftp.mkdir(seg)
+                        except OSError:
+                            pass
+                print(f"Upload {rel} -> {remote}", file=sys.stderr)
+                sftp.put(str(local), remote)
+            sftp.close()
+            steps = [
+                "pkill -9 -f build.sh 2>/dev/null || true",
+                "pkill -9 -f ninja 2>/dev/null || true",
+                "pkill -9 -f cc1plus 2>/dev/null || true",
+                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                f"test -x '{PROJ}/build/trading-core' && ls -la '{PROJ}/build/trading-core'",
+                "pgrep -af 'trading-core|start_bot' || echo BOT_NOT_RUNNING_OK",
+                f"test -f '{PROJ}/logs/STOP_TRADING' && echo STOP_FLAG=present || echo STOP_FLAG=missing",
+                f"grep -E '^PAPER_MODE=|^LIH_ENABLED=|^LIH_ONE_SLOT|^RISK_MAX_CONCURRENT' '{PROJ}/.env'",
+            ]
+            for step in steps:
+                r = run(client, step, timeout=1800)
+                if r != 0 and "./build.sh" in step:
+                    return r
+            return 0
+
         if mode == "stop-after-round" or mode == "pause-after-round":
             upload_files = [
                 "clob_live.py",
                 "dashboard_bridge.py",
                 "scripts/live_lih_reconcile.py",
                 "trading-core/src/exec/OrderRouter.cpp",
+                "trading-core/src/exec/OrderRouter.h",
                 "trading-core/src/risk/RiskManager.cpp",
                 "trading-core/src/risk/RiskManager.h",
                 "trading-core/src/main.cpp",

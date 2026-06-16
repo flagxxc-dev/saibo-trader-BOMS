@@ -1,19 +1,32 @@
 """
-fetch_balance.py — Polymarket tradable balance for the C++ bot.
-Prints a single float to stdout.
+fetch_balance.py — Polymarket wallet balance for the C++ bot / dashboard.
 
-Priority:
-  1. CLOB v2 collateral (after update_balance_allowance cache refresh)
-  2. On-chain pUSD + USDC.e + USDC on POLYMARKET_FUNDER (V2 fallback)
+Stdout: one float = **total wallet value** (cash + open positions), matching Polymarket UI.
+
+Cash = max(CLOB collateral, on-chain pUSD+USDC) on POLYMARKET_FUNDER.
+Positions = sum(currentValue) from Data API (optional; 0 if unreachable).
+
+Run on server:
+  cd /opt/polymarket-bot && .venv/bin/python fetch_balance.py
+  .venv/bin/python fetch_balance.py --json   # breakdown
+
+Requires POLYMARKET_FUNDER (POLYMARKET_PRIVATE_KEY optional for CLOB refresh).
 """
+from __future__ import annotations
+
+import json
 import os
 import sys
+import urllib.parse
+import urllib.request
 
 import requests
 from dotenv import load_dotenv
 
 HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137
+DATA_API = "https://data-api.polymarket.com"
+UA = {"User-Agent": "polymarket-bot/1.0", "Accept": "application/json"}
 
 PUSD = "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb"
 USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -24,6 +37,27 @@ RPC_URLS = [
     "https://polygon-rpc.com",
     "https://rpc.ankr.com/polygon",
 ]
+
+
+def _strip_env(val: str) -> str:
+    v = (val or "").strip().strip("'\"")
+    if v.startswith("#"):
+        return ""
+    return v
+
+
+def resolve_funder() -> str:
+    """Wallet that holds Polymarket collateral (proxy), not the EOA signer."""
+    load_dotenv()
+    funder = _strip_env(os.getenv("POLYMARKET_FUNDER", ""))
+    if funder:
+        return funder if funder.startswith("0x") else f"0x{funder}"
+    # Last resort: signer (often wrong for proxy wallets — set POLYMARKET_FUNDER)
+    signer = _strip_env(os.getenv("POLYMARKET_SIGNER", ""))
+    if signer:
+        print("[fetch_balance] warn: POLYMARKET_FUNDER unset, using SIGNER", file=sys.stderr)
+        return signer if signer.startswith("0x") else f"0x{signer}"
+    return ""
 
 
 def on_chain_erc20_balance(holder: str, contract: str) -> float:
@@ -71,18 +105,15 @@ def fetch_clob_collateral(pk: str, funder: str, signer: str) -> float:
     client = ClobClient(
         HOST, key=pk, chain_id=CHAIN_ID, signature_type=sig_type, funder=funder
     )
-
     creds = client.derive_api_key()
     auth = ClobClient(
         HOST, key=pk, chain_id=CHAIN_ID, signature_type=sig_type, funder=funder, creds=creds
     )
-
-    # Refresh CLOB balance cache (required after on-chain deposits / V2 migration)
     try:
         auth.update_balance_allowance(
             params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig_type)
         )
-        print(f"[fetch_balance] CLOB balance cache refreshed (sig_type={sig_type})", file=sys.stderr)
+        print(f"[fetch_balance] CLOB cache refreshed (sig_type={sig_type})", file=sys.stderr)
     except Exception as exc:
         print(f"[fetch_balance] update_balance_allowance warn: {exc}", file=sys.stderr)
 
@@ -95,39 +126,85 @@ def fetch_clob_collateral(pk: str, funder: str, signer: str) -> float:
     return raw
 
 
-def fetch_balance() -> float:
-    try:
-        load_dotenv()
-    except Exception:
-        pass
+def fetch_positions_value(user: str) -> tuple[float, int]:
+    params = urllib.parse.urlencode(
+        {"user": user.lower(), "limit": 500, "sizeThreshold": 0.01}
+    )
+    req = urllib.request.Request(f"{DATA_API}/positions?{params}", headers=UA)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        rows = json.loads(resp.read().decode())
+    if not isinstance(rows, list):
+        return 0.0, 0
+    total = 0.0
+    for row in rows:
+        if isinstance(row, dict):
+            total += float(row.get("currentValue") or row.get("value") or 0)
+    return total, len(rows)
 
-    pk = os.getenv("POLYMARKET_PRIVATE_KEY", "").strip()
-    funder = os.getenv("POLYMARKET_FUNDER", "").strip()
-    signer = os.getenv("POLYMARKET_SIGNER", "").strip()
+
+def fetch_balance_detail() -> dict[str, float | int | str]:
+    load_dotenv()
+    funder = resolve_funder()
+    signer = _strip_env(os.getenv("POLYMARKET_SIGNER", "")) or funder
+    pk = _strip_env(os.getenv("POLYMARKET_PRIVATE_KEY", ""))
     fallback = float(os.getenv("LIVE_STARTING_BALANCE", "0") or 0)
 
-    if not pk or not funder:
-        return fallback
-
-    if not pk.startswith("0x"):
-        pk = "0x" + pk
-
-    clob_bal = 0.0
-    try:
-        clob_bal = fetch_clob_collateral(pk, funder, signer)
-        if clob_bal > 0:
-            print(f"[fetch_balance] CLOB collateral: ${clob_bal:.6f}", file=sys.stderr)
-    except Exception as exc:
-        print(f"[fetch_balance] CLOB error: {exc}", file=sys.stderr)
+    if not funder:
+        return {
+            "funder": "",
+            "cash": fallback,
+            "positions": 0.0,
+            "position_count": 0,
+            "total": fallback,
+            "source": "fallback_no_funder",
+        }
 
     chain_bal = on_chain_collateral_total(funder)
+    clob_bal = 0.0
+    if pk:
+        if not pk.startswith("0x"):
+            pk = "0x" + pk
+        try:
+            clob_bal = fetch_clob_collateral(pk, funder, signer)
+            if clob_bal > 0:
+                print(f"[fetch_balance] CLOB collateral: ${clob_bal:.6f}", file=sys.stderr)
+        except Exception as exc:
+            print(f"[fetch_balance] CLOB error: {exc}", file=sys.stderr)
 
-    # Use the higher of CLOB ledger vs on-chain (pUSD often on-chain before CLOB sync)
-    balance = max(clob_bal, chain_bal)
-    if balance <= 0:
-        balance = fallback
-    return balance
+    cash = max(clob_bal, chain_bal)
+    pos_val, pos_n = 0.0, 0
+    try:
+        pos_val, pos_n = fetch_positions_value(funder)
+        if pos_n:
+            print(f"[fetch_balance] open positions: {pos_n} rows, ${pos_val:.6f}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[fetch_balance] positions warn: {exc}", file=sys.stderr)
+
+    total = cash + pos_val
+    if total <= 0:
+        total = fallback
+        cash = fallback
+        source = "fallback"
+    else:
+        source = "live"
+
+    return {
+        "funder": funder,
+        "cash": cash,
+        "positions": pos_val,
+        "position_count": pos_n,
+        "total": total,
+        "source": source,
+    }
+
+
+def fetch_balance() -> float:
+    return float(fetch_balance_detail()["total"])
 
 
 if __name__ == "__main__":
-    print(f"{fetch_balance():.6f}")
+    detail = fetch_balance_detail()
+    if "--json" in sys.argv:
+        print(json.dumps(detail, ensure_ascii=False))
+    else:
+        print(f"{detail['total']:.6f}")

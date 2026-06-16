@@ -30,10 +30,9 @@ def main() -> int:
     run(f"cd '{PROJ}' && .venv/bin/python scripts/live_lih_reconcile.py")
     print("=== reload ===")
     body = json.dumps({"control": "reload_lih_state", "user": "sync-positions"})
-    run(
-        f"curl -s -X POST http://127.0.0.1:8081/api/control "
-        f"-H 'Content-Type: application/json' -d '{body}'"
-    )
+    run(f"printf '%s' '{body}' > '{PROJ}/logs/runtime_config.json'")
+    import time
+    time.sleep(4)
     print("=== after ===")
     run(
         "curl -s http://127.0.0.1:8081/api/config | python3 -c "

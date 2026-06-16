@@ -125,6 +125,13 @@ export interface LiveState {
   tradeHistory: TradeRecord[];
   telemetryLog: string[];
   signalLog: string[];
+  /** false when WebSocket/SSE has not delivered a fresh frame recently */
+  botStreamConnected: boolean;
+  cashBalance?: number;
+  positionsValue?: number;
+  /** On-chain wallet total from fetch_balance.py (independent of paper sim balance) */
+  realWalletBalance?: number;
+  walletSource?: string;
 }
 
 const defaultState: LiveState = {
@@ -182,7 +189,10 @@ const defaultState: LiveState = {
   tradeHistory: [],
   telemetryLog: [],
   signalLog: [],
+  botStreamConnected: false,
 };
+
+const STREAM_STALE_MS = 8000;
 
 function toNumber(value: unknown, fallback = 0): number {
   const n = Number(value);
@@ -416,11 +426,17 @@ function normalizeLiveState(raw: Record<string, unknown>): LiveState {
     tradeHistory: normalizeTradeHistory(raw.tradeHistory),
     telemetryLog: normalizeStringArray(raw.telemetryLog),
     signalLog: normalizeStringArray(raw.signalLog),
+    botStreamConnected: true,
+    cashBalance: toNumber(raw.cashBalance, 0) || undefined,
+    positionsValue: toNumber(raw.positionsValue, 0) || undefined,
+    realWalletBalance: toNumber(raw.realWalletBalance, 0) || undefined,
+    walletSource: typeof raw.walletSource === "string" ? raw.walletSource : undefined,
   };
 }
 
 export function useLiveState() {
   const [state, setState] = useState<LiveState>(defaultState);
+  const [lastFrameAt, setLastFrameAt] = useState(0);
 
   useEffect(() => {
     const eventSource = new EventSource("/api/live");
@@ -428,7 +444,9 @@ export function useLiveState() {
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as Record<string, unknown>;
-        setState(normalizeLiveState(data));
+        const now = Date.now();
+        setLastFrameAt(now);
+        setState({ ...normalizeLiveState(data), botStreamConnected: true });
       } catch (err) {
         console.error("Failed to parse live state:", err);
       }
@@ -436,12 +454,37 @@ export function useLiveState() {
 
     eventSource.onerror = () => {
       console.warn("Live state stream interrupted");
+      setState((prev) => ({
+        ...prev,
+        botStreamConnected: false,
+        status: 3,
+        statusReason: prev.statusReason || "Bot 数据流中断",
+      }));
     };
 
     return () => {
       eventSource.close();
     };
   }, []);
+
+  useEffect(() => {
+    const tick = window.setInterval(() => {
+      if (!lastFrameAt) return;
+      if (Date.now() - lastFrameAt > STREAM_STALE_MS) {
+        setState((prev) =>
+          prev.botStreamConnected
+            ? {
+                ...prev,
+                botStreamConnected: false,
+                status: 3,
+                statusReason: "Bot 未连接或数据过期",
+              }
+            : prev
+        );
+      }
+    }, 2000);
+    return () => window.clearInterval(tick);
+  }, [lastFrameAt]);
 
   return state;
 }

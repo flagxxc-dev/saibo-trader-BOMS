@@ -1,5 +1,6 @@
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <string>
 #include <unordered_set>
 #include <spdlog/spdlog.h>
@@ -32,6 +33,23 @@ namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
+// =============================================================================
+// trading-core 主程序 (main.cpp)
+// -----------------------------------------------------------------------------
+// 职责：读取 .env → 初始化风控/行情/策略/下单 → 主循环输出 JSON 给 dashboard_bridge
+// 模块概览：
+//   1. 链上余额查询        fetch_usdc_balance*
+//   2. 配置加载            load_env / env_flag_true
+//   3. 实盘余额同步        sync_live_balance
+//   4. 到期自动赎回        attempt_onchain_redeem_async
+//   5. 纸面模拟辅助        apply_paper_slippage / paper_hedge_liquidity_miss
+//   6. 市场结算定价        try_binary_settlement_prices / official_settlement_prices
+//   7. LIH/DH 到期平仓     check_and_close_lih/dh_positions
+//   8. Web 热更新配置      apply_runtime_config
+//   9. main() 启动与主循环  见下方分段注释
+// =============================================================================
+
+// --- 1. 链上余额：通过 Polygon RPC 读取 ERC20 余额（pUSD / USDC.e / USDC）---
 // Query USDC balance from Polygon RPC (on-chain)
 double fetch_usdc_balance_for_contract(const std::string& funder_address, const std::string& usdc_contract, const std::string& label) {
     try {
@@ -141,6 +159,7 @@ double fetch_usdc_balance(const std::string& funder_address) {
     return total;
 }
 
+// --- 2. 配置加载：解析项目根目录 .env（忽略 # 注释行）---
 std::unordered_map<std::string, std::string> load_env(const std::string& filepath) {
     std::unordered_map<std::string, std::string> env;
     std::ifstream file(filepath);
@@ -168,9 +187,11 @@ std::unordered_map<std::string, std::string> load_env(const std::string& filepat
     return env;
 }
 
+// --- 3. 自动赎回去重：同一 condition_id 只触发一次链上 redeem ---
 static std::unordered_set<std::string> g_redeem_triggered;
 static std::mutex g_redeem_mutex;
 
+// 解析 .env 布尔值（true/false/1/0/yes/no/on/off）
 static bool env_flag_true(const std::unordered_map<std::string, std::string>& env, const std::string& key, bool default_val) {
     auto it = env.find(key);
     if (it == env.end()) return default_val;
@@ -181,6 +202,7 @@ static bool env_flag_true(const std::unordered_map<std::string, std::string>& en
     return default_val;
 }
 
+// --- 4. 实盘余额同步：调用 fetch_balance.py 刷新 RiskManager 当前余额 ---
 static void sync_live_balance(risk::RiskManager& risk_manager) {
 #ifdef _WIN32
     FILE* pipe = popen("python fetch_balance.py", "r");
@@ -198,6 +220,7 @@ static void sync_live_balance(risk::RiskManager& risk_manager) {
     pclose(pipe);
 }
 
+// --- 5. 到期自动赎回：后台线程调用 redeem_positions.py 把已结算仓位换回 USDC ---
 static void attempt_onchain_redeem_async(
     const std::string& condition_id,
     const std::string& dh_id,
@@ -259,6 +282,7 @@ static void attempt_onchain_redeem_async(
     }).detach();
 }
 
+// --- 6. 纸面模拟辅助：滑点、对冲失败概率、LIH 各阶段额外滑点 ---
 static double apply_paper_slippage(double price, bool is_buy, double slip_pct) {
     if (slip_pct <= 0.0 || price <= 0.0) return price;
     return is_buy ? price * (1.0 + slip_pct) : price * (1.0 - slip_pct);
@@ -287,6 +311,7 @@ static double paper_action_extra_slip(const StateStore& store, const LegInAction
     return 0.0;
 }
 
+// 从 .env 读取 double，解析失败则返回 fallback
 static double env_double_or(const std::unordered_map<std::string, std::string>& env,
                             const char* key, double fallback) {
     auto it = env.find(key);
@@ -298,6 +323,7 @@ static double env_double_or(const std::unordered_map<std::string, std::string>& 
     }
 }
 
+// --- 7. 市场结算：窗口到期后确定 YES/NO 兑付价（官方结算 > 盘口 bid > 0.5/0.5 兜底）---
 static std::optional<std::pair<double, double>> try_binary_settlement_prices(
     GammaClient& gamma,
     StateStore& store,
@@ -354,6 +380,7 @@ static std::pair<double, double> official_settlement_prices(
     return {0.5, 0.5};
 }
 
+// --- 8. LIH 到期平仓：已对冲按 1:1 结算；未对冲需等 0/1 官方结果 ---
 void check_and_close_lih_positions(
     risk::RiskManager& risk_manager,
     StateStore& store,
@@ -407,6 +434,7 @@ void check_and_close_lih_positions(
     }
 }
 
+// --- 9. DH 到期平仓：双边持仓按结算价 register_dh_close，实盘可选 auto-redeem ---
 void check_and_close_dh_positions(
     risk::RiskManager& risk_manager,
     StateStore& store,
@@ -436,12 +464,14 @@ void check_and_close_dh_positions(
     }
 }
 
+// 解析 Web/bridge 写入的布尔配置字符串
 static bool parse_config_bool(const std::string& v) {
     std::string lower = v;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
     return !(lower == "false" || lower == "0" || lower == "no" || lower == "off");
 }
 
+// 按资产/窗口粒度开关 DH 市场（DH_ENABLE_5M_BTC 等）
 static bool apply_dh_asset_config(StateStore& store, const std::string& k, const std::string& v) {
     const bool enabled = parse_config_bool(v);
     if (k == "DH_ENABLE_5M_BTC") {
@@ -472,8 +502,10 @@ static bool apply_dh_asset_config(StateStore& store, const std::string& k, const
     return false;
 }
 
+// 实盘 LIH 快照路径（供 reload_lih_state 控制指令使用）
 static std::string g_live_state_reload_path;
 
+// --- 10. Web 热更新：读取 logs/runtime_config.json，应用 pause/resume/参数 patch 后删除 ---
 static void apply_runtime_config(
     const std::string& path,
     risk::RiskManager& risk_manager,
@@ -499,6 +531,7 @@ static void apply_runtime_config(
 
     auto& obj = jv.as_object();
 
+    // control：pause / resume / reset_kill / reload_lih_state / reset_lih_session
     if (obj.contains("control") && obj.at("control").is_string()) {
         std::string action = std::string(obj.at("control").as_string());
         std::string reason = obj.contains("reason") ? std::string(obj.at("reason").as_string()) : "Web control";
@@ -506,7 +539,10 @@ static void apply_runtime_config(
             risk_manager.pause(reason);
             store.push_telemetry(fmt::format("CONFIG PAUSE | {}", reason));
         } else if (action == "resume") {
-            if (risk_manager.resume()) {
+            if (std::filesystem::exists("logs/STOP_TRADING")) {
+                store.push_telemetry("CONFIG RESUME blocked | logs/STOP_TRADING flag set");
+                spdlog::warn("Resume blocked: logs/STOP_TRADING flag is set");
+            } else if (risk_manager.resume()) {
                 if (risk_manager.get_lih_pause_after_round()) {
                     risk_manager.reset_lih_session();
                 }
@@ -530,6 +566,7 @@ static void apply_runtime_config(
         }
     }
 
+    // patch：Web 策略页保存的 .env 热更新项（风控 / DH / LIH / 资产开关）
     if (obj.contains("patch") && obj.at("patch").is_object()) {
         const auto& patch = obj.at("patch").as_object();
         double sum_target = store.get_dh_sum_target();
@@ -694,14 +731,19 @@ static void apply_runtime_config(
     std::remove(path.c_str());
 }
 
+// =============================================================================
+// main — 程序入口：初始化 → 启动 Feed 线程 → 250ms 主循环 → stdout JSON 遥测
+// =============================================================================
 int main() {
     try {
+        // --- A. 日志：写入 bot.log ---
         auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("bot.log", true);
         auto logger = std::make_shared<spdlog::logger>("bot", file_sink);
         spdlog::set_default_logger(logger);
         spdlog::set_level(spdlog::level::debug);
         spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
 
+        // --- B. 读取 .env：纸面/实盘模式、Polymarket 钱包、起始余额 ---
         auto env = load_env(".env");
         bool paper_mode = true;
         if (env.count("PAPER_MODE")) {
@@ -715,7 +757,7 @@ int main() {
         std::string polymarket_signer = env.count("POLYMARKET_SIGNER") ? env["POLYMARKET_SIGNER"] : "";
         std::string polymarket_funder = env.count("POLYMARKET_FUNDER") ? env["POLYMARKET_FUNDER"] : "";
         
-        // Default signer to funder if missing, or vice-versa
+        // signer/funder 互为默认；代理钱包模式下两者通常不同，勿留空 SIGNER
         if (polymarket_signer.empty() && !polymarket_funder.empty()) polymarket_signer = polymarket_funder;
         if (polymarket_funder.empty() && !polymarket_signer.empty()) polymarket_funder = polymarket_signer;
 
@@ -723,7 +765,7 @@ int main() {
         if (paper_mode && env.count("PAPER_STARTING_BALANCE")) {
             starting_balance = std::stod(env["PAPER_STARTING_BALANCE"]);
         } else if (!paper_mode) {
-            // Auto-detect balance via Python SDK (most reliable method)
+            // 实盘：优先 fetch_balance.py（链上 pUSD + 持仓），失败则 RPC 直查
             starting_balance = 0.0;
             spdlog::info("Fetching Polymarket balance via SDK...");
 #ifdef _WIN32
@@ -767,12 +809,14 @@ int main() {
         } else if (polymarket_pk.empty()) {
             polymarket_pk = "0x0000000000000000000000000000000000000000000000000000000000000001";
         }
+        // --- C. EIP-712 签名合约：标准 V2 与 NegRisk（5m/15m Up-Down 用后者）---
         // V2 Exchange addresses (April 2026 migration)
         const std::string V2_EXCHANGE = "0xE111180000d2663C0091e4f400237545B87B996B";
         const std::string V2_NEG_RISK = "0xe2222d279d744050d28e00520010520000310F59";
         
         std::string verifying_contract = V2_EXCHANGE;
 
+        // --- D. 实盘开关：auto-redeem、DH/LIH dry-run、Python CLOB bridge 路径 ---
         bool auto_redeem = !paper_mode && env_flag_true(env, "AUTO_REDEEM", true);
         bool live_dh_dry_run = !paper_mode && env_flag_true(env, "LIVE_DH_DRY_RUN", false);
         bool live_lih_dry_run = !paper_mode && env_flag_true(env, "LIVE_LIH_DRY_RUN", true);
@@ -787,6 +831,7 @@ int main() {
                      live_dh_dry_run ? "on" : "off",
                      live_lih_dry_run ? "on" : "off");
 
+        // --- E. 网络 IO 上下文：Feed 线程（Binance/Polymarket WS）与 Gamma REST ---
         boost::asio::io_context feed_ioc;
         boost::asio::ssl::context feed_ctx{boost::asio::ssl::context::sslv23_client};
         feed_ctx.set_default_verify_paths();
@@ -795,6 +840,7 @@ int main() {
         boost::asio::ssl::context gamma_ctx{boost::asio::ssl::context::sslv23_client};
         gamma_ctx.set_default_verify_paths();
 
+        // --- F. 风控参数（RiskManager）与 DH 结构对冲阈值 ---
         double max_pos = env.count("RISK_MAX_POSITION_FRACTION") ? std::stod(env["RISK_MAX_POSITION_FRACTION"]) : 0.08;
         double daily_loss = env.count("RISK_DAILY_LOSS_LIMIT") ? std::stod(env["RISK_DAILY_LOSS_LIMIT"]) : 0.20;
         double drawdown = env.count("RISK_TOTAL_DRAWDOWN_KILL") ? std::stod(env["RISK_TOTAL_DRAWDOWN_KILL"]) : 0.40;
@@ -806,6 +852,7 @@ int main() {
         double dh_cooldown = env.count("DH_COOLDOWN_SECONDS") ? std::stod(env["DH_COOLDOWN_SECONDS"]) : 30.0;
         double dh_min_secs = env.count("DH_MIN_SECONDS_REMAINING") ? std::stod(env["DH_MIN_SECONDS_REMAINING"]) : 60.0;
 
+        // --- G. LIH 分腿对冲参数（leg1 入场 / rebalance / force 配平）---
         bool lih_enabled = env_flag_true(env, "LIH_ENABLED", true);
         if (!paper_mode && lih_enabled && !live_lih_dry_run) {
             spdlog::warn("[LIVE LIH] LIVE_LIH_DRY_RUN=false — real CLOB orders WILL be sent");
@@ -851,6 +898,7 @@ int main() {
 
         const std::string strategy = lih_enabled ? "leg_in" : "dump_hedge";
 
+        // --- H. 行情与纸面 realism：Binance 图表、官方 CLOB 订单簿、深度/滑点模拟 ---
         bool binance_feed_enabled = true;
         if (env.count("BINANCE_FEED_ENABLED")) {
             std::string bf = env["BINANCE_FEED_ENABLED"];
@@ -919,6 +967,7 @@ int main() {
             spdlog::info("DH config | sum<={:.2f} disc>={:.2f}", dh_sum_target, dh_min_discount);
         }
 
+        // --- I. CLOB API 凭据（实盘必填，由 derive_and_update_keys.py 生成）---
         std::string poly_api_key = env.count("POLY_API_KEY") ? env["POLY_API_KEY"] : "";
         std::string poly_api_secret = env.count("POLY_API_SECRET") ? env["POLY_API_SECRET"] : "";
         std::string poly_api_passphrase = env.count("POLY_PASSPHRASE") ? env["POLY_PASSPHRASE"] : "";
@@ -930,6 +979,7 @@ int main() {
             return 1;
         }
 
+        // --- J. 核心状态：StateStore（遥测/行情缓存）+ RiskManager（仓位/风控）---
         StateStore store;
         store.set_paper_mode(paper_mode);
         if (!paper_mode) {
@@ -949,6 +999,7 @@ int main() {
                          starting_balance, lih_min_balance_usdc);
         }
 
+        // --- K. 状态持久化：纸面 paper_state.json / 实盘 live_state.json ---
         bool paper_state_persist = true;
         if (env.count("PAPER_STATE_PERSIST")) {
             std::string ps = env["PAPER_STATE_PERSIST"];
@@ -984,6 +1035,18 @@ int main() {
             store.push_telemetry(fmt::format("LEGACY LA CLOSED | {} position(s)", legacy_la));
         }
 
+        // --- L. 启动保护：logs/STOP_TRADING 强制暂停；恢复持久化的 PAUSED 状态 ---
+        if (std::filesystem::exists("logs/STOP_TRADING")) {
+            risk_manager.pause("STOP_TRADING flag — remove file to allow resume");
+            store.push_telemetry("STARTUP PAUSED | logs/STOP_TRADING");
+            spdlog::warn("Startup: trading forced PAUSED (logs/STOP_TRADING)");
+        } else if (risk_manager.get_status() == risk::TradingStatus::PAUSED) {
+            const auto reason = risk_manager.get_status_reason();
+            spdlog::warn("Startup: trading remains PAUSED ({})",
+                         reason.value_or("persisted state"));
+        }
+
+        // --- M. 将风控/策略/纸面参数写入 StateStore，供 JSON 遥测与检测器读取 ---
         store.set_risk_manager(&risk_manager);
         store.set_fee_rate(fee_rate);
         store.set_strategy(strategy);
@@ -1022,8 +1085,10 @@ int main() {
             } catch (...) {}
         }
 
+        // --- N. 下单路由：纸面模拟 / 实盘 CLOB（含 NegRisk 双签名器）---
         exec::OrderRouter router(feed_ioc, feed_ctx, store, risk_manager, polymarket_host, polymarket_chain_id, verifying_contract, polymarket_pk, polymarket_signer, polymarket_funder, paper_mode, poly_api_key, poly_api_secret, poly_api_passphrase, neg_risk_exchange, live_dh_dry_run, live_lih_dry_run, use_python_clob, clob_bridge_host, clob_bridge_port, clob_bridge_path);
 
+        // --- O. 外部客户端：Gamma（市场列表/结算/REST 兜底）+ Binance WS ---
         GammaClient gamma(gamma_ioc, gamma_ctx);
         std::shared_ptr<BinanceFeed> btc_feed;
         std::shared_ptr<BinanceFeed> eth_feed;
@@ -1037,10 +1102,12 @@ int main() {
         auto feed_work = boost::asio::make_work_guard(feed_ioc);
         std::thread feed_thread([&feed_ioc]() { feed_ioc.run(); });
 
+        // --- P. 策略检测器：DumpHedge（结构对冲）或 LegInHedge（分腿 LIH）---
         std::mutex detector_mutex;
         std::unique_ptr<DumpHedgeDetector> dh_detector;
         std::unique_ptr<LegInHedgeDetector> lih_detector;
 
+        // LIH 动作执行：实盘走 OrderRouter；纸面本地 register + 深度/滑点/realism 模拟
         auto execute_lih_action = [&](const LegInAction& act, double now_sec) {
             if (!paper_mode) {
                 const bool ok = router.submit_lih_action(act, now_sec);
@@ -1181,6 +1248,7 @@ int main() {
             }
         };
 
+        // 每个 Polymarket tick 触发 LIH evaluate（LIH 模式）或 DH evaluate（DH 模式）
         auto try_lih_evaluate = [&]() {
             if (!lih_enabled || !lih_detector) return;
             std::lock_guard<std::mutex> lock(detector_mutex);
@@ -1194,6 +1262,7 @@ int main() {
 
         auto poly_feed = std::make_shared<PolymarketFeed>(feed_ioc, feed_ctx, store);
 
+        // Polymarket WS 价格推送回调 → LIH/DH 信号检测 → 下单
         poly_feed->set_tick_callback([&](const std::string& /*token_id*/) {
             try_lih_evaluate();
 
@@ -1228,6 +1297,7 @@ int main() {
             if (!router.submit_dump_hedge_order(fill_signal, size_shares)) return;
         });
 
+        // --- Q. 启动行情 Feed（回调注册完成后再 start，避免竞态）---
         // Start feeds only after all callbacks are ready
         if (binance_feed_enabled) {
             btc_feed->start();
@@ -1238,6 +1308,8 @@ int main() {
 
         std::atomic<bool> is_refreshing{false};
         std::vector<std::string> rest_poll_tokens;
+
+        // --- R. 市场刷新：Gamma 拉 5m/15m Up-Down 列表 → 重建检测器 → 订阅 token ---
         auto refresh_markets = [&]() {
             if (is_refreshing.exchange(true)) return;
             try {
@@ -1298,6 +1370,7 @@ int main() {
         std::this_thread::sleep_for(std::chrono::seconds(3));
         auto last_market_refresh = std::chrono::system_clock::now();
         
+        // --- S. 后台线程：每 60s 实盘余额同步（fetch_balance.py）---
         // Start balance sync thread
         std::thread balance_thread([&]() {
             while (true) {
@@ -1306,7 +1379,8 @@ int main() {
 #ifdef _WIN32
                     FILE* pipe = popen("python fetch_balance.py", "r");
 #else
-                    FILE* pipe = popen("python3 fetch_balance.py 2>/dev/null", "r");
+                    // Must use project venv — system python3 lacks dotenv/py_clob_client.
+                    FILE* pipe = popen(".venv/bin/python3 fetch_balance.py 2>/dev/null", "r");
 #endif
                     if (pipe) {
                         char buf[128];
@@ -1325,6 +1399,7 @@ int main() {
         });
         balance_thread.detach();
 
+        // Binance REST 兜底：WS 不可用时轮询现货价（Docker/地区限制常见）
         auto poll_binance_rest = [&]() {
             struct SymMap { const char* sym; void (StateStore::*upd)(const PriceTick&); };
             SymMap maps[] = {
@@ -1353,10 +1428,12 @@ int main() {
         auto last_rest_book_poll = std::chrono::system_clock::now() - std::chrono::seconds(5);
         std::atomic<bool> rest_book_refreshing{false};
 
+        // --- T. 主循环（250ms）：REST 订单簿 / 市场刷新 / 配置热更新 / 到期结算 / JSON 输出 ---
         while (true) {
             auto loop_start = std::chrono::system_clock::now();
             const bool poll_rest_book = book_aware_detect || paper_official_book;
             if (poll_rest_book &&
+                // 每 ~2.5s 拉官方 CLOB 订单簿（DH book-aware / 纸面官方定价）
                 !rest_book_refreshing.load(std::memory_order_acquire) &&
                 loop_start - last_rest_book_poll > std::chrono::milliseconds(2500)) {
                 last_rest_book_poll = loop_start;
@@ -1374,6 +1451,7 @@ int main() {
                 }
             }
             if (loop_start - last_market_refresh > std::chrono::seconds(60)) {
+                // 每 60s 刷新 Up-Down 市场列表与 token 订阅
                 last_market_refresh = loop_start;
                 std::thread([&refresh_markets]() { refresh_markets(); }).detach();
             }
@@ -1389,18 +1467,18 @@ int main() {
                     poll_binance_rest();
                 }
             }
-            risk_manager.is_trading_allowed(); // Trigger resume checks even if no signals fire
+            risk_manager.is_trading_allowed(); // 检查熔断自动恢复
             apply_runtime_config("logs/runtime_config.json", risk_manager, store, detector_mutex, dh_detector, lih_detector);
             check_and_close_dh_positions(risk_manager, store, gamma, auto_redeem);
             if (lih_enabled) {
-                if (paper_mode) store.reload_live_mirror();
+                if (paper_mode) store.reload_live_mirror(); // 纸面读 mirror 定价
                 const double now_sec_loop = std::chrono::duration<double>(
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 if (!paper_mode) {
                     risk_manager.purge_expired_lih_open(now_sec_loop, 30.0);
                 }
                 check_and_close_lih_positions(risk_manager, store, gamma, auto_redeem);
-                try_lih_evaluate();
+                try_lih_evaluate(); // 主循环也跑 LIH（不依赖 tick）
             }
             if (paper_mode && paper_state_persist && loop_start - last_paper_save > std::chrono::seconds(10)) {
                 last_paper_save = loop_start;
@@ -1410,7 +1488,7 @@ int main() {
                 last_live_save = loop_start;
                 persistence::save_live_lih_state(risk_manager, live_state_path);
             }
-            std::cout << store.get_dashboard_json() << std::endl;
+            std::cout << store.get_dashboard_json() << std::endl; // → dashboard_bridge stdout
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
 

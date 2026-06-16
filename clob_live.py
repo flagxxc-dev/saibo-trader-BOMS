@@ -144,6 +144,7 @@ def _activity_fill_for_token(
     fallback_price: float,
     *,
     since_ts: float | None = None,
+    order_id: str = "",
 ) -> tuple[float, float]:
     """Last-resort: match recent wallet TRADE rows when CLOB poll returns 0 shares."""
     try:
@@ -151,21 +152,35 @@ def _activity_fill_for_token(
     except ImportError:
         return fallback_price, 0.0
     side_u = side.upper()
-    cutoff = (since_ts or (time.time() - 120.0)) - 30.0
-    for row in fetch_user_trades(limit=40):
+    oid = (order_id or "").strip().lower()
+    cutoff = (since_ts or (time.time() - 120.0)) - 60.0
+    tok = str(token_id).strip()
+    total_shares = 0.0
+    weighted_cost = 0.0
+    for row in fetch_user_trades(limit=60):
         if not isinstance(row, dict) or row.get("error"):
             continue
-        if str(row.get("tokenID") or "") != str(token_id):
+        row_tok = str(row.get("tokenID") or row.get("asset") or "")
+        if tok and row_tok and row_tok != tok:
             continue
         if str(row.get("side") or "").upper() != side_u:
             continue
         ts = float(row.get("timestamp") or 0)
         if ts > 0 and ts < cutoff:
             continue
+        if oid:
+            row_oid = str(row.get("orderID") or row.get("id") or "").lower()
+            if row_oid and oid not in row_oid and row_oid not in oid:
+                continue
         size = float(row.get("size") or 0)
         price = float(row.get("price") or 0)
-        if size > 0:
-            return (price if price > 0 else fallback_price), size
+        if size <= 0:
+            continue
+        total_shares += size
+        weighted_cost += size * (price if price > 0 else fallback_price)
+    if total_shares > 0:
+        avg = weighted_cost / total_shares
+        return (avg if avg > 0 else fallback_price), total_shares
     return fallback_price, 0.0
 
 
@@ -179,9 +194,9 @@ def _poll_order_fill(
     submit_ts: float | None = None,
 ) -> tuple[float, float, str]:
     status = ""
-    for attempt in range(14):
+    for attempt in range(40):
         if attempt > 0:
-            time.sleep(0.22)
+            time.sleep(0.35)
         try:
             raw = client.get_order(order_id)
             resp = raw if isinstance(raw, dict) else {}
@@ -190,12 +205,16 @@ def _poll_order_fill(
             if shares > 0:
                 return (price if price > 0 else fallback_price), shares, status
             if status in ("unmatched", "cancelled", "expired", "failed"):
-                return fallback_price, 0.0, status
+                break
         except Exception:
             continue
     if token_id:
         price, shares = _activity_fill_for_token(
-            token_id, side, fallback_price, since_ts=submit_ts
+            token_id,
+            side,
+            fallback_price,
+            since_ts=submit_ts,
+            order_id=order_id,
         )
         if shares > 0:
             return price, shares, "activity"
@@ -236,7 +255,11 @@ def _normalize_result(
 
     if fill_shares <= 0 and token_id:
         act_price, act_shares = _activity_fill_for_token(
-            token_id, side, fallback_price, since_ts=(submit_ts or time.time()) - 600.0
+            token_id,
+            side,
+            fallback_price,
+            since_ts=(submit_ts or time.time()) - 600.0,
+            order_id=order_id,
         )
         if act_shares > 0:
             fill_price, fill_shares = act_price, act_shares
@@ -259,6 +282,61 @@ def _normalize_result(
         "order_id": order_id,
         "status": status or "matched",
         "error": "",
+    }
+
+
+def resolve_order_fill(
+    token_id: str,
+    side: str,
+    fallback_price: float,
+    order_id: str = "",
+    *,
+    submit_ts: float | None = None,
+) -> dict[str, Any]:
+    """Re-query CLOB + activity after C++ got 0 fill (Data API may lag)."""
+    submit_ts = submit_ts or time.time()
+    client = _client()
+    if order_id:
+        price, shares, status = _poll_order_fill(
+            client,
+            order_id,
+            side,
+            fallback_price,
+            token_id=token_id,
+            submit_ts=submit_ts,
+        )
+        if shares > 0:
+            return {
+                "success": True,
+                "price": price,
+                "size_shares": shares,
+                "order_id": order_id,
+                "status": status or "resolved",
+                "error": "",
+            }
+    price, shares = _activity_fill_for_token(
+        token_id,
+        side,
+        fallback_price,
+        since_ts=submit_ts,
+        order_id=order_id,
+    )
+    if shares > 0:
+        return {
+            "success": True,
+            "price": price,
+            "size_shares": shares,
+            "order_id": order_id,
+            "status": "activity",
+            "error": "",
+        }
+    return {
+        "success": False,
+        "price": fallback_price,
+        "size_shares": 0.0,
+        "order_id": order_id,
+        "status": "unresolved",
+        "error": "0 fill after resolve",
     }
 
 

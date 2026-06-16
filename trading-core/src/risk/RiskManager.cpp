@@ -2,6 +2,7 @@
 #include <spdlog/spdlog.h>
 #include <numeric>
 #include <cmath>
+#include <algorithm>
 #include <boost/json.hpp>
 
 namespace risk {
@@ -575,15 +576,21 @@ void RiskManager::set_lih_max_matched_shares(double v) {
 std::optional<LegInHedgePosition> RiskManager::find_open_lih_by_asset(
     const std::string& asset, int window_minutes) const {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
+    std::string want = asset;
+    std::transform(want.begin(), want.end(), want.begin(), ::tolower);
     for (const auto& [id, p] : open_lih_positions_) {
-        if (p.asset == asset && p.window_minutes == window_minutes) return p;
+        std::string have = p.asset;
+        std::transform(have.begin(), have.end(), have.begin(), ::tolower);
+        if (have == want && p.window_minutes == window_minutes) return p;
     }
     return std::nullopt;
 }
 
 namespace {
 std::string lih_slot_key(const std::string& asset, int window_minutes) {
-    return asset + "|" + std::to_string(window_minutes);
+    std::string a = asset;
+    std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+    return a + "|" + std::to_string(window_minutes);
 }
 } // namespace
 
@@ -744,6 +751,7 @@ LegInHedgePosition RiskManager::register_lih_open_leg1(
     LegInHedgePosition pos;
     pos.lih_id = "LIH-" + market.asset + "-" + std::to_string(static_cast<uint64_t>(now_sec * 1000.0));
     pos.asset = market.asset;
+    std::transform(pos.asset.begin(), pos.asset.end(), pos.asset.begin(), ::tolower);
     pos.market_question = market.question;
     pos.yes_token_id = market.yes_token_id;
     pos.no_token_id = market.no_token_id;
@@ -1015,9 +1023,12 @@ void RiskManager::set_max_concurrent_positions(int v) {
 
 void RiskManager::pause(const std::string& reason) {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
-    if (status_ == TradingStatus::ACTIVE) {
-        status_ = TradingStatus::PAUSED;
-        kill_reason_ = reason;
+    if (status_ == TradingStatus::KILLED) return;
+    circuit_breaker_resume_at_ = 0.0;
+    const bool was_active = status_ == TradingStatus::ACTIVE;
+    status_ = TradingStatus::PAUSED;
+    kill_reason_ = reason;
+    if (was_active) {
         spdlog::warn("Trading PAUSED: {}", reason);
     }
 }
@@ -1413,6 +1424,7 @@ bool lih_position_from_json(const boost::json::object& o, LegInHedgePosition& p)
     try {
         p.lih_id = std::string(o.at("lih_id").as_string());
         p.asset = o.contains("asset") ? std::string(o.at("asset").as_string()) : "";
+        std::transform(p.asset.begin(), p.asset.end(), p.asset.begin(), ::tolower);
         p.market_question = o.contains("market_question") ? std::string(o.at("market_question").as_string()) : "";
         p.yes_token_id = o.contains("yes_token_id") ? std::string(o.at("yes_token_id").as_string()) : "";
         p.no_token_id = o.contains("no_token_id") ? std::string(o.at("no_token_id").as_string()) : "";

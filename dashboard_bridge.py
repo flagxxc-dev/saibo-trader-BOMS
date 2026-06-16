@@ -21,9 +21,10 @@ from bot_config import (
 )
 
 try:
-    from clob_live import post_fak_order
+    from clob_live import post_fak_order, resolve_order_fill
 except ImportError:
     post_fak_order = None
+    resolve_order_fill = None
 
 try:
     from clob_trades import fetch_user_trades
@@ -42,6 +43,76 @@ CORE_CMD = ["./build/trading-core.exe"] if os.name == "nt" else ["./build/tradin
 clients = set()
 latest_data = "{}"
 _core_ready_printed = False
+_WALLET_PERSIST_KEYS = ("realWalletBalance", "cashBalance", "positionsValue", "walletSource")
+
+
+def _persist_wallet_fields(incoming: dict, previous: dict) -> None:
+    for key in _WALLET_PERSIST_KEYS:
+        if key in previous:
+            incoming[key] = previous[key]
+
+
+def _merge_core_telemetry(line: str) -> str:
+    try:
+        incoming = json.loads(line)
+        previous = json.loads(latest_data or "{}")
+        if isinstance(incoming, dict) and isinstance(previous, dict):
+            _persist_wallet_fields(incoming, previous)
+            return json.dumps(incoming, ensure_ascii=False)
+    except json.JSONDecodeError:
+        pass
+    return line
+
+
+def _apply_wallet_snapshot(detail: dict) -> bool:
+    global latest_data
+    if not isinstance(detail, dict) or not detail.get("funder"):
+        return False
+    if str(detail.get("source") or "") not in ("live", "on_chain", "clob"):
+        return False
+    total = float(detail.get("total") or 0)
+    if total <= 0:
+        return False
+    cash = float(detail.get("cash") or 0)
+    pos = float(detail.get("positions") or 0)
+    obj = json.loads(latest_data or "{}")
+    if not isinstance(obj, dict):
+        obj = {}
+    obj["realWalletBalance"] = total
+    obj["cashBalance"] = cash
+    obj["positionsValue"] = pos
+    obj["walletSource"] = str(detail.get("source") or "live")
+    paper = os.getenv("PAPER_MODE", "true").lower() not in ("false", "0", "no", "off")
+    if not paper:
+        obj["balance"] = total
+    latest_data = json.dumps(obj, ensure_ascii=False)
+    if clients and loop:
+        asyncio.run_coroutine_threadsafe(broadcast(latest_data), loop)
+    return True
+
+
+def _wallet_sync_once() -> None:
+    funder = (os.getenv("POLYMARKET_FUNDER") or "").strip()
+    if not funder or funder.startswith("#"):
+        return
+    try:
+        proc = subprocess.run(
+            [sys.executable, "fetch_balance.py", "--json"],
+            cwd=os.getcwd(),
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        detail = json.loads((proc.stdout or "").strip() or "{}")
+        if _apply_wallet_snapshot(detail):
+            print(
+                f"[WALLET] synced total=${float(detail.get('total') or 0):.2f} "
+                f"cash=${float(detail.get('cash') or 0):.2f}",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"[WALLET] sync failed: {exc}", file=sys.stderr)
 
 
 def _print_startup_banner() -> None:
@@ -245,8 +316,37 @@ class ConfigHTTPHandler(BaseHTTPRequestHandler):
                     return
                 neg_risk = bool(body.get("neg_risk", False))
                 result = post_fak_order(token_id, price, size_shares, side, neg_risk=neg_risk)
-                status = 200 if result.get("success") else 400
-                _json_response(self, status, result)
+                # Always 200 so C++ bridge parses order_id even when fill is still 0.
+                _json_response(self, 200, result)
+                return
+
+            if path == "/internal/clob/resolve":
+                if not _is_localhost(self):
+                    _json_response(self, 403, {"error": "localhost only"})
+                    return
+                if resolve_order_fill is None:
+                    _json_response(self, 503, {"error": "clob_live unavailable"})
+                    return
+                body = _read_body(self)
+                token_id = str(body.get("token_id") or "").strip()
+                side = str(body.get("side") or "BUY").strip()
+                order_id = str(body.get("order_id") or "").strip()
+                try:
+                    price = float(body.get("price"))
+                except (TypeError, ValueError):
+                    price = 0.0
+                submit_ts = body.get("submit_ts")
+                try:
+                    submit_ts_f = float(submit_ts) if submit_ts is not None else None
+                except (TypeError, ValueError):
+                    submit_ts_f = None
+                if not token_id:
+                    _json_response(self, 400, {"error": "token_id required"})
+                    return
+                result = resolve_order_fill(
+                    token_id, side, price, order_id, submit_ts=submit_ts_f
+                )
+                _json_response(self, 200, result)
                 return
 
             if not _check_api_auth(self):
@@ -320,6 +420,13 @@ async def handler(websocket):
         clients.remove(websocket)
 
 
+def _wallet_sync_loop() -> None:
+    """Refresh on-chain wallet total (cash + positions) for dashboard — read-only."""
+    while True:
+        _wallet_sync_once()
+        time.sleep(60)
+
+
 def _live_maintenance_loop() -> None:
     """Prune expired LIH rows from disk and ask core to reload (live only)."""
     while True:
@@ -343,6 +450,21 @@ def _live_maintenance_loop() -> None:
                 print(f"[MAINT] prune failed: {exc}", file=sys.stderr)
 
 
+def _mark_core_offline(reason: str = "trading-core stopped") -> None:
+    global latest_data
+    try:
+        obj = json.loads(latest_data or "{}")
+        if not isinstance(obj, dict):
+            obj = {}
+    except json.JSONDecodeError:
+        obj = {}
+    obj["status"] = 3
+    obj["statusReason"] = reason
+    latest_data = json.dumps(obj, ensure_ascii=False)
+    if clients and loop:
+        asyncio.run_coroutine_threadsafe(broadcast(latest_data), loop)
+
+
 def run_core():
     global latest_data
     process = subprocess.Popen(
@@ -363,11 +485,15 @@ def run_core():
     for line in process.stdout:
         line = line.strip()
         if line.startswith("{") and line.endswith("}"):
+            line = _merge_core_telemetry(line)
             latest_data = line
             _maybe_print_core_ready(line)
             asyncio.run_coroutine_threadsafe(broadcast(line), loop)
         else:
             print(f"[CORE INFO] {line}", file=sys.stderr)
+
+    code = process.wait()
+    _mark_core_offline(f"trading-core exited ({code})")
 
 
 async def main():
@@ -377,6 +503,7 @@ async def main():
     _run_preflight()
     _print_startup_banner()
     threading.Thread(target=run_http_server, daemon=True).start()
+    threading.Thread(target=_wallet_sync_loop, daemon=True).start()
     threading.Thread(target=_live_maintenance_loop, daemon=True).start()
 
     async with websockets.serve(handler, WS_HOST, WS_PORT):

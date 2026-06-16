@@ -133,6 +133,12 @@ private:
         const std::string& original_order_id,
         const std::string& position_id_salt
     );
+    LegFillResult resolve_clob_fill(
+        const std::string& token_id,
+        double fallback_price,
+        const std::string& order_id,
+        uint8_t side = 0
+    );
 
     // When register_position=false, sends to CLOB only (used for DH legs / unwind).
     LegFillResult execute_rest_order(

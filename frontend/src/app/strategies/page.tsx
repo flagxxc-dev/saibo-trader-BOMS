@@ -169,8 +169,10 @@ export default function StrategiesPage() {
   const [dhSumTarget, setDhSumTarget] = useState("0.95");
   const [dhMinDiscount, setDhMinDiscount] = useState("0.03");
 
-  const botActive = live.status !== 3;
-  const controlsDisabled = loading || live.status === 2;
+  const botActive =
+    live.botStreamConnected && live.status === 0;
+  const controlsDisabled =
+    loading || live.status === 2 || !live.botStreamConnected;
 
   const loadEnvConfig = useCallback(async () => {
     try {
@@ -285,7 +287,12 @@ export default function StrategiesPage() {
           {" · "}
           模式：<span className="font-mono">{live.isPaperMode ? "纸面" : "实盘"}</span>
           {" · "}
-          状态：<span className="font-mono">{live.statusReason || (botActive ? "运行中" : "已暂停")}</span>
+          状态：
+          <span className="font-mono">
+            {!live.botStreamConnected
+              ? live.statusReason || "Bot 未连接"
+              : live.statusReason || (botActive ? "运行中" : "已暂停")}
+          </span>
           {!live.isPaperMode && lihMode && (
             <span className="ml-2 text-amber-200/90">
               （实盘 LIH：{live.liveLihDryRun !== false ? "shadow 验簿，不发单" : "已关闭 dry-run，会真下单"}）
