@@ -106,6 +106,38 @@ def run_prelive_step(*, allow_live: bool = False, min_shadow_leg1: int = 0, live
     return report
 
 
+def maybe_reconcile_live_lih() -> None:
+    """Rebuild live LIH memory from chain when real live mode starts (not shadow)."""
+    load_dotenv()
+    if _env_bool("PAPER_MODE", True):
+        return
+    if _env_bool("LIVE_LIH_DRY_RUN", True):
+        print("[reconcile] skip — shadow mode (LIVE_LIH_DRY_RUN=true)", file=sys.stderr)
+        return
+    if not _env_bool("LIVE_LIH_RECONCILE_ON_START", True):
+        print("[reconcile] skip — LIVE_LIH_RECONCILE_ON_START=false", file=sys.stderr)
+        return
+    script = Path(__file__).resolve().parent / "scripts" / "live_lih_reconcile.py"
+    if not script.is_file():
+        print(f"[reconcile] skip — missing {script}", file=sys.stderr)
+        return
+    import subprocess
+
+    print("[reconcile] syncing open LIH from Polymarket activity …", file=sys.stderr)
+    proc = subprocess.run(
+        [sys.executable, str(script), "--merge"],
+        cwd=str(Path(__file__).resolve().parent),
+        capture_output=True,
+        text=True,
+    )
+    if proc.stdout.strip():
+        print(proc.stdout.strip(), file=sys.stderr)
+    if proc.returncode != 0:
+        print(proc.stderr.strip() or f"[reconcile] exit {proc.returncode}", file=sys.stderr)
+    else:
+        print("[reconcile] done", file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="启动 bot（自检 + 配置摘要 + bridge/core）")
     parser.add_argument("--skip-preflight", action="store_true", help="跳过自检（Docker entrypoint 已跑过时）")
@@ -177,6 +209,9 @@ def main() -> int:
             print("⚠️  LIH prelive 有警告（shadow 模式仍启动，请先处理重复 LEG1）", file=sys.stderr)
     elif skip_prelive and not paper and lih:
         print("[prelive] 跳过（START_SKIP_PRELIVE / --skip-prelive）", file=sys.stderr)
+
+    if not paper and lih:
+        maybe_reconcile_live_lih()
 
     print_config_summary()
     os.environ["PREFLIGHT_SKIP"] = "1"

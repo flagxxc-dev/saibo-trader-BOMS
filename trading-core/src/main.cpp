@@ -1476,6 +1476,12 @@ int main() {
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 if (!paper_mode) {
                     risk_manager.purge_expired_lih_open(now_sec_loop, 30.0);
+                    if (!live_lih_dry_run) {
+                        const int pending_resolved = router.poll_lih_pending_fills(now_sec_loop);
+                        if (pending_resolved > 0 && live_state_persist) {
+                            persistence::save_live_lih_state(risk_manager, live_state_path);
+                        }
+                    }
                 }
                 check_and_close_lih_positions(risk_manager, store, gamma, auto_redeem);
                 try_lih_evaluate(); // 主循环也跑 LIH（不依赖 tick）

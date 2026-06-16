@@ -32,6 +32,16 @@ def _outcome_side(outcome: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--prune-only", action="store_true", help="only drop expired open rows")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print reconciled slots without writing live_state.json",
+    )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="merge chain slots into existing open_lih_positions instead of replacing",
+    )
     args = parser.parse_args()
 
     if args.prune_only:
@@ -145,6 +155,14 @@ def main() -> int:
             pass
 
     open_lih: dict = {}
+    if args.merge and live_path.is_file():
+        try:
+            existing = json.loads(live_path.read_text(encoding="utf-8"))
+            if isinstance(existing.get("open_lih_positions"), dict):
+                open_lih = dict(existing["open_lih_positions"])
+        except json.JSONDecodeError:
+            pass
+
     for _key, row in slots.items():
         total_shares = row["yes_shares"] + row["no_shares"]
         if total_shares <= 0:
@@ -153,6 +171,15 @@ def main() -> int:
         yes_avg = row["yes_cost"] / row["yes_shares"] if row["yes_shares"] > 0 else 0.0
         no_avg = row["no_cost"] / row["no_shares"] if row["no_shares"] > 0 else 0.0
         lih_id = f"LIH-{row['asset']}-{int(row['opened_at'] * 1000)}-recon"
+        if args.merge:
+            for existing in open_lih.values():
+                if (
+                    str(existing.get("asset", "")).lower() == row["asset"]
+                    and int(existing.get("window_minutes") or 0) == int(row["window_minutes"])
+                    and abs(float(existing.get("end_date_ts") or 0) - float(row["end_date_ts"] or 0)) < 1.0
+                ):
+                    lih_id = str(existing.get("lih_id") or lih_id)
+                    break
         pos = {
             "lih_id": lih_id,
             "asset": row["asset"],
@@ -184,6 +211,9 @@ def main() -> int:
 
     doc["open_lih_positions"] = open_lih
     doc["total_lih_trades"] = max(int(doc.get("total_lih_trades") or 0), len(open_lih))
+    if args.dry_run:
+        print(f"[dry-run] would write {len(open_lih)} open LIH slot(s) -> {live_path}")
+        return 0
     live_path.parent.mkdir(parents=True, exist_ok=True)
     live_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Wrote {len(open_lih)} active open LIH slot(s) -> {live_path}")

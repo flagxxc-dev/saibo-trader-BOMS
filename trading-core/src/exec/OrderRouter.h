@@ -3,6 +3,7 @@
 #include "EIP712Signer.h"
 #include "../state/StateStore.h"
 #include "../risk/RiskManager.h"
+#include "../signals/LegInHedgeDetector.h"
 #include "../signals/Signal.h"
 #include <string>
 #include <memory>
@@ -18,7 +19,6 @@
 #include <boost/json.hpp>
 
 namespace trading {
-struct LegInAction;
 namespace exec {
 
 struct LegFillResult {
@@ -70,6 +70,9 @@ public:
     /** Live LIH execution (book-aware). Returns false on validation failure. No-op in paper mode. */
     bool submit_lih_action(const trading::LegInAction& act, double now_sec);
 
+    /** Re-resolve pending CLOB fills and register when confirmed. No-op in paper/shadow. */
+    int poll_lih_pending_fills(double now_sec);
+
     bool live_lih_dry_run() const { return live_lih_dry_run_; }
 
     bool submit_order(const std::string& token_id, 
@@ -113,6 +116,28 @@ private:
     std::string clob_bridge_host_;
     int clob_bridge_port_;
     std::string clob_bridge_path_;
+
+    struct LihPendingFill {
+        LegInAction::Kind kind = LegInAction::Kind::OpenLeg1;
+        trading::MarketInfo market;
+        bool buy_yes = false;
+        std::string token_id;
+        std::string order_id;
+        std::string lih_id;
+        double exec_px = 0.0;
+        double shares = 0.0;
+        double started_at_sec = 0.0;
+        double last_poll_sec = 0.0;
+    };
+    std::vector<LihPendingFill> lih_pending_fills_;
+
+    void track_lih_pending_fill(
+        const trading::LegInAction& act,
+        const std::string& token_id,
+        const std::string& order_id,
+        double exec_px,
+        double shares,
+        double now_sec);
     
     std::unique_ptr<EIP712Signer> signer_;
     std::unique_ptr<EIP712Signer> signer_neg_risk_;
