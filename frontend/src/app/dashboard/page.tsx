@@ -10,12 +10,22 @@ import { TradingPanels } from "@/components/dashboard/TradingPanels";
 import { PreflightBanner } from "@/components/dashboard/PreflightBanner";
 import { useLiveState } from "@/hooks/useLiveState";
 import { coreStatusLabel } from "@/lib/coreStatus";
+import {
+  cumulativeClosedTrades,
+  isLihPrimary,
+  strategyRealizedPnl,
+  strategyShortLabel,
+} from "@/lib/strategyMode";
 import { Activity, DollarSign, Briefcase, Percent, TrendingUp } from "lucide-react";
 import { useState, useEffect } from "react";
 
 export default function DashboardPage() {
   const liveState = useLiveState();
   const [mounted, setMounted] = useState(false);
+  const lihMode = isLihPrimary(liveState);
+  const strategyLabel = strategyShortLabel(liveState);
+  const closedTrades = cumulativeClosedTrades(liveState);
+  const strategyPnl = strategyRealizedPnl(liveState);
 
   useEffect(() => {
     setMounted(true);
@@ -29,7 +39,7 @@ export default function DashboardPage() {
       <PageContainer className="space-y-5">
         <PageHeader
           title="仪表盘"
-          description="DH 结构对冲 · 实时行情、持仓与成交流水。"
+          description={`${strategyLabel} 分腿对冲 · 实时行情、持仓与成交流水。`}
           icon={Activity}
         />
 
@@ -67,7 +77,14 @@ export default function DashboardPage() {
             </CardHeader>
             <CardContent className="pb-4">
               <div className="text-2xl font-mono font-bold tracking-tight">{liveState.openPositions}</div>
-              <p className="text-xs text-muted-foreground mt-2">累计 DH 成交 {liveState.totalDhTrades} 笔</p>
+              <p className="text-xs text-muted-foreground mt-2">
+                累计 {strategyLabel} 成交 {closedTrades} 笔
+                {strategyPnl !== 0 && (
+                  <span className="ml-2">
+                    · 已实现 {strategyPnl >= 0 ? "+" : ""}${strategyPnl.toFixed(2)}
+                  </span>
+                )}
+              </p>
             </CardContent>
           </GlassCard>
 
@@ -119,8 +136,17 @@ export default function DashboardPage() {
         </div>
 
         <div className="rounded-lg border border-violet-500/20 bg-violet-500/8 px-4 py-2.5 text-[13px] text-violet-100/90">
-          <strong>DH 模式</strong> — 开仓看 YES+NO 合价（目标 ≤ {liveState.dhSumTarget.toFixed(2)}）；Binance
-          走势仅作参考，与是否开仓无关。
+          {lihMode ? (
+            <>
+              <strong>LIH 模式</strong> — 先买便宜腿（≤ {liveState.lihLeg1MaxPrice.toFixed(2)}），再 rebalance / 对冲至合价 ≤{" "}
+              {liveState.lihTargetCombined.toFixed(2)}；Binance 走势仅作参考。
+            </>
+          ) : (
+            <>
+              <strong>DH 模式</strong> — 开仓看 YES+NO 合价（目标 ≤ {liveState.dhSumTarget.toFixed(2)}）；Binance
+              走势仅作参考，与是否开仓无关。
+            </>
+          )}
         </div>
 
         <div className="space-y-5">
@@ -139,6 +165,8 @@ export default function DashboardPage() {
             feeRate={liveState.feeRate}
             timestamp={liveState.timestamp}
             marketsScanned={liveState.marketsScanned}
+            lihEnabled={lihMode}
+            lihTargetCombined={liveState.lihTargetCombined}
           />
         </div>
 

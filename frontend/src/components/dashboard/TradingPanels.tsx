@@ -3,6 +3,12 @@
 import { useEffect, useState } from "react";
 import { GlassCard, CardContent, CardHeader, CardTitle } from "@/components/shared/GlassCard";
 import type { LiveState, OpenPosition } from "@/hooks/useLiveState";
+import {
+  cumulativeClosedTrades,
+  isLihPrimary,
+  strategyRealizedPnl,
+  strategyShortLabel,
+} from "@/lib/strategyMode";
 import { Briefcase, Radio, Zap, Clock, TrendingUp, TrendingDown } from "lucide-react";
 import { classifyTradeLog } from "@/lib/tradeLog";
 
@@ -113,7 +119,7 @@ function LegRow({
         </div>
         <div>
           <p className="text-white/30 mb-0.5">份额</p>
-          <p className="font-mono text-white/80">{active && size > 0 ? size.toFixed(2) : "—"}</p>
+          <p className="font-mono text-white/80">{size > 0 ? size.toFixed(2) : "—"}</p>
         </div>
         <div>
           <p className="text-white/30 mb-0.5">成本</p>
@@ -126,9 +132,10 @@ function LegRow({
 
 function PositionCard({ pos, feeRate }: { pos: OpenPosition; feeRate: number }) {
   const isDh = pos.strategy === "DH";
+  const isLih = pos.strategy === "LIH";
   const windowMin = pos.windowMinutes ?? 5;
-  const yesActive = isDh || pos.heldSide === "YES";
-  const noActive = isDh || pos.heldSide === "NO";
+  const yesActive = isDh || (pos.yesSize ?? 0) > 0;
+  const noActive = isDh || (pos.noSize ?? 0) > 0;
 
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
@@ -144,6 +151,7 @@ function PositionCard({ pos, feeRate }: { pos: OpenPosition; feeRate: number }) 
               {windowMin}m
             </span>
             {isDh && <span className="text-[10px] text-white/35">折价对冲</span>}
+            {isLih && <span className="text-[10px] text-white/35">分腿对冲</span>}
           </div>
           <p className="text-[11px] text-white/40 max-w-lg leading-relaxed">{pos.question}</p>
         </div>
@@ -205,6 +213,11 @@ function PositionCard({ pos, feeRate }: { pos: OpenPosition; feeRate: number }) 
 }
 
 export function TradingPanels({ liveState }: { liveState: LiveState }) {
+  const lihMode = isLihPrimary(liveState);
+  const strategyLabel = strategyShortLabel(liveState);
+  const closedTrades = cumulativeClosedTrades(liveState);
+  const strategyPnl = strategyRealizedPnl(liveState);
+
   return (
     <div className="grid gap-5">
       <GlassCard>
@@ -215,7 +228,7 @@ export function TradingPanels({ liveState }: { liveState: LiveState }) {
               当前持仓
             </CardTitle>
             <span className="text-[11px] font-mono text-muted-foreground">
-              {liveState.openPositions} 笔 · DH 已实现 ${liveState.dhPnl.toFixed(2)} · 费率{" "}
+              {liveState.openPositions} 笔 · {strategyLabel} 已实现 ${strategyPnl.toFixed(2)} · 累计成交 {closedTrades} 笔 · 费率{" "}
               {(liveState.feeRate * 100).toFixed(1)}%
             </span>
           </div>
@@ -223,7 +236,9 @@ export function TradingPanels({ liveState }: { liveState: LiveState }) {
         <CardContent>
           {liveState.positionList.length === 0 ? (
             <div className="py-12 text-center text-muted-foreground text-xs font-mono border border-dashed border-border rounded-xl">
-              暂无持仓，检测到 DH 信号后自动开仓
+              {lihMode
+                ? "暂无持仓，检测到 LIH 便宜腿信号后自动开仓"
+                : "暂无持仓，检测到 DH 信号后自动开仓"}
             </div>
           ) : (
             <div className="space-y-4">
@@ -263,11 +278,14 @@ export function TradingPanels({ liveState }: { liveState: LiveState }) {
           <CardHeader>
             <CardTitle className="font-heading text-sm font-semibold tracking-tight flex items-center gap-2">
               <Zap className="h-4 w-4 text-amber-400/70" />
-              DH 策略信号
+              {lihMode ? "LIH 策略信号" : "DH 策略信号"}
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <FeedList lines={liveState.signalLog} emptyText="等待 DH 策略信号..." />
+            <FeedList
+              lines={liveState.signalLog}
+              emptyText={lihMode ? "等待 LIH 策略信号..." : "等待 DH 策略信号..."}
+            />
           </CardContent>
         </GlassCard>
       </div>

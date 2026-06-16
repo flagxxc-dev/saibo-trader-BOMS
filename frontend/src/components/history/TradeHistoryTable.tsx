@@ -91,7 +91,7 @@ export function TradeHistoryTable({ records, emptyText }: { records: TradeRecord
                     {tradeWindowLabel(windowMin)}
                   </span>
                   <span className="text-white/30 ml-1 text-[10px]">
-                    {hedge ? "折价对冲" : "延迟套利"}
+                    {r.strategy === "LIH" ? "分腿对冲" : hedge ? "折价对冲" : "延迟套利"}
                   </span>
                 </td>
                 <td className="px-3 py-2.5 text-white/80 uppercase font-bold">{r.asset}</td>

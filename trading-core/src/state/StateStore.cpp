@@ -1,5 +1,6 @@
 #include "StateStore.h"
 #include <mutex>
+#include <fstream>
 #include <boost/json.hpp>
 #include <algorithm>
 #include <chrono>
@@ -160,6 +161,234 @@ std::optional<TokenPrice> StateStore::get_token_price(std::string_view token_id)
     return std::nullopt;
 }
 
+void StateStore::update_ws_book_ask(std::string_view token_id, const TokenPrice& price) {
+    std::unique_lock lock(token_mutex_);
+    ws_book_asks_[std::string(token_id)] = price;
+}
+
+void StateStore::update_rest_book_ask(std::string_view token_id, double price, double depth_shares) {
+    std::unique_lock lock(token_mutex_);
+    const std::string key(token_id);
+    TokenPrice tp;
+    tp.price = price;
+    tp.side = "BUY";
+    tp.ts = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    rest_book_asks_[key] = tp;
+    rest_book_depth_[key] = depth_shares;
+}
+
+void StateStore::update_rest_ask_ladder(std::string_view token_id, std::vector<BookLevel> levels) {
+    std::unique_lock lock(token_mutex_);
+    const std::string key(token_id);
+    std::sort(levels.begin(), levels.end(),
+              [](const BookLevel& a, const BookLevel& b) { return a.price < b.price; });
+    rest_ask_ladders_[key] = std::move(levels);
+}
+
+StateStore::WalkFillResult StateStore::walk_ask_fill(
+    std::string_view token_id, double max_shares, double rest_max_age_sec) const {
+    WalkFillResult out;
+    if (max_shares <= 0.0) return out;
+
+    std::shared_lock lock(token_mutex_);
+    const std::string key(token_id);
+    const double now = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    const double max_age = paper_realism_enabled_ ? paper_book_max_age_secs_ : rest_max_age_sec;
+
+    auto rest = rest_book_asks_.find(key);
+    if (rest == rest_book_asks_.end() || rest->second.price <= 0.0
+        || (now - rest->second.ts) > max_age) {
+        return out;
+    }
+
+    std::vector<BookLevel> ladder;
+    auto lad = rest_ask_ladders_.find(key);
+    if (lad != rest_ask_ladders_.end() && !lad->second.empty()) {
+        ladder = lad->second;
+    } else {
+        auto dep = rest_book_depth_.find(key);
+        const double depth = dep != rest_book_depth_.end() ? dep->second : 0.0;
+        if (depth > 0.0) {
+            ladder.push_back({rest->second.price, depth});
+        }
+    }
+    if (ladder.empty()) return out;
+
+    const double take_ratio = paper_realism_enabled_
+        ? std::clamp(paper_liquidity_take_ratio_, 0.05, 1.0) : 1.0;
+    const double slip = paper_slippage_pct_;
+    double remaining = max_shares;
+    for (const auto& level : ladder) {
+        if (level.price <= 0.0 || level.size <= 0.0) continue;
+        const double px = level.price * (1.0 + slip);
+        const double avail = level.size * take_ratio;
+        const double take = std::min(remaining, avail);
+        out.cost_usdc += take * px;
+        out.shares += take;
+        ++out.levels_used;
+        remaining -= take;
+        if (remaining <= 1e-6) break;
+    }
+    if (out.shares > 0.0) {
+        out.avg_price = out.cost_usdc / out.shares;
+    }
+    if (paper_realism_enabled_ && paper_min_fill_ratio_ > 0.0 && max_shares > 0.0
+        && out.shares + 1e-6 < max_shares * paper_min_fill_ratio_) {
+        return {};
+    }
+    return out;
+}
+
+StateStore::WalkFillResult StateStore::walk_paired_fill(
+    std::string_view yes_token, std::string_view no_token,
+    double max_shares, double balance_usdc, double balance_reserve,
+    double rest_max_age_sec) const {
+    WalkFillResult out;
+    if (max_shares <= 0.0 || balance_usdc <= 0.0) return out;
+
+    const double budget = balance_usdc * balance_reserve;
+    auto paired_cost = [&](double target_shares) -> double {
+        if (target_shares <= 0.0) return 0.0;
+        const auto yes_f = walk_ask_fill(yes_token, target_shares, rest_max_age_sec);
+        const auto no_f = walk_ask_fill(no_token, target_shares, rest_max_age_sec);
+        const double paired = std::min(yes_f.shares, no_f.shares);
+        if (paired <= 0.0) return 1e18;
+        const auto yes_final = walk_ask_fill(yes_token, paired, rest_max_age_sec);
+        const auto no_final = walk_ask_fill(no_token, paired, rest_max_age_sec);
+        return yes_final.cost_usdc + no_final.cost_usdc;
+    };
+
+    double lo = 0.0;
+    double hi = max_shares;
+    for (int i = 0; i < 24; ++i) {
+        const double mid = (lo + hi) * 0.5;
+        if (paired_cost(mid) <= budget + 1e-6) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo <= 1e-6) return out;
+
+    const auto yes_f = walk_ask_fill(yes_token, lo, rest_max_age_sec);
+    const auto no_f = walk_ask_fill(no_token, lo, rest_max_age_sec);
+    out.shares = std::min(yes_f.shares, no_f.shares);
+    if (out.shares <= 0.0) return out;
+
+    const auto yes_final = walk_ask_fill(yes_token, out.shares, rest_max_age_sec);
+    const auto no_final = walk_ask_fill(no_token, out.shares, rest_max_age_sec);
+    out.shares = std::min(yes_final.shares, no_final.shares);
+    if (out.shares <= 0.0) return out;
+
+    const auto yes_done = walk_ask_fill(yes_token, out.shares, rest_max_age_sec);
+    const auto no_done = walk_ask_fill(no_token, out.shares, rest_max_age_sec);
+    out.cost_usdc = yes_done.cost_usdc + no_done.cost_usdc;
+    out.levels_used = yes_done.levels_used + no_done.levels_used;
+    if (out.shares > 0.0 && out.cost_usdc > 0.0) {
+        out.avg_price = out.cost_usdc / out.shares;
+    }
+    return out;
+}
+
+void StateStore::update_rest_book_bid(std::string_view token_id, double price) {
+    std::unique_lock lock(token_mutex_);
+    const std::string key(token_id);
+    TokenPrice tp;
+    tp.price = price;
+    tp.side = "SELL";
+    tp.ts = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    rest_book_bids_[key] = tp;
+}
+
+std::optional<double> StateStore::get_official_mark_bid(
+    std::string_view token_id, double rest_max_age_sec) const {
+    std::shared_lock lock(token_mutex_);
+    const std::string key(token_id);
+    const double now = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    auto rest = rest_book_bids_.find(key);
+    if (rest != rest_book_bids_.end() && rest->second.price > 0.0
+        && (now - rest->second.ts) <= rest_max_age_sec) {
+        return rest->second.price;
+    }
+    auto ws = token_bids_.find(key);
+    if (ws != token_bids_.end() && ws->second.price > 0.0) {
+        return ws->second.price;
+    }
+    return std::nullopt;
+}
+
+std::optional<double> StateStore::get_official_buy_ask(
+    std::string_view token_id, double rest_max_age_sec) const {
+    std::shared_lock lock(token_mutex_);
+    const std::string key(token_id);
+    const double now = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    auto rest = rest_book_asks_.find(key);
+    if (rest != rest_book_asks_.end() && rest->second.price > 0.0
+        && (now - rest->second.ts) <= rest_max_age_sec) {
+        return rest->second.price;
+    }
+    auto ws = ws_book_asks_.find(key);
+    if (ws != ws_book_asks_.end() && ws->second.price > 0.0) {
+        return ws->second.price;
+    }
+    auto ask = token_prices_.find(key);
+    if (ask != token_prices_.end() && ask->second.price > 0.0) {
+        return ask->second.price;
+    }
+    return std::nullopt;
+}
+
+std::optional<StateStore::DetectionAsk> StateStore::get_detection_ask(
+    std::string_view token_id, double rest_max_age_sec) const {
+    std::shared_lock lock(token_mutex_);
+    const std::string key(token_id);
+    const double now = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    DetectionAsk out;
+    auto ws_it = ws_book_asks_.find(key);
+    if (ws_it != ws_book_asks_.end() && ws_it->second.price > 0.0) {
+        out.ws_book_ask = ws_it->second.price;
+        out.ws_ok = (now - ws_it->second.ts) <= 30.0;
+    }
+    auto rest_it = rest_book_asks_.find(key);
+    if (rest_it != rest_book_asks_.end() && rest_it->second.price > 0.0) {
+        out.rest_book_ask = rest_it->second.price;
+        out.rest_ok = (now - rest_it->second.ts) <= rest_max_age_sec;
+        auto dep = rest_book_depth_.find(key);
+        if (dep != rest_book_depth_.end()) out.rest_depth_shares = dep->second;
+    }
+
+    if (!book_aware_detect_) {
+        auto ask = token_prices_.find(key);
+        if (ask != token_prices_.end() && ask->second.price > 0.0) {
+            out.conservative_ask = ask->second.price;
+            out.ws_ok = true;
+            return out;
+        }
+        return std::nullopt;
+    }
+
+    if (out.ws_ok && out.rest_ok) {
+        out.conservative_ask = std::max(out.ws_book_ask, out.rest_book_ask);
+    } else if (out.rest_ok) {
+        out.conservative_ask = out.rest_book_ask;
+    } else if (out.ws_ok) {
+        out.conservative_ask = out.ws_book_ask;
+    } else {
+        return std::nullopt;
+    }
+    return out;
+}
+
 void StateStore::update_markets(const std::vector<MarketInfo>& markets) {
     std::unique_lock lock(market_mutex_);
     markets_ = markets;
@@ -215,6 +444,18 @@ std::string StateStore::get_dashboard_json() const {
     root["dhEnable15mBtc"] = dh_15m_btc_;
     root["dhEnable15mEth"] = dh_15m_eth_;
     root["binanceFeedEnabled"] = binance_feed_enabled_;
+    root["lihEnabled"] = lih_enabled_;
+    root["lihDisableDh"] = lih_disable_dh_;
+    root["lihLeg1MaxPrice"] = lih_leg1_max_price_;
+    root["lihTargetCombined"] = lih_target_combined_;
+    root["lihUseMirror"] = lih_use_mirror_;
+    root["liveLihDryRun"] = live_lih_dry_run_;
+    if (trades_baseline_ts_ > 0) root["tradesBaselineTs"] = trades_baseline_ts_;
+    {
+        std::shared_lock lock(mirror_mutex_);
+        root["mirrorLoadedAt"] = mirror_loaded_at_;
+        root["mirrorAssetCount"] = static_cast<int64_t>(mirror_by_asset_.size());
+    }
     
     if (risk_manager_) {
         double balance = risk_manager_->get_current_balance();
@@ -234,9 +475,11 @@ std::string StateStore::get_dashboard_json() const {
         root["openCount"] = risk_manager_->get_open_position_count();
         root["totalTrades"] = risk_manager_->get_total_trades();
         root["totalDhTrades"] = risk_manager_->get_total_dh_trades();
+        root["totalLihTrades"] = risk_manager_->get_total_lih_trades();
         root["winRate"] = risk_manager_->get_win_rate() * 100.0;
         root["laPnl"] = risk_manager_->get_la_pnl();
         root["dhPnl"] = risk_manager_->get_dh_pnl();
+        root["lihPnl"] = risk_manager_->get_lih_pnl();
         root["status"] = static_cast<int>(risk_manager_->get_status());
         if (auto reason = risk_manager_->get_status_reason()) {
             root["statusReason"] = reason->c_str();
@@ -258,15 +501,32 @@ std::string StateStore::get_dashboard_json() const {
         root["riskDailyLossLimit"] = risk_manager_->get_daily_loss_limit();
         root["riskTotalDrawdownKill"] = risk_manager_->get_total_drawdown_kill();
         root["riskMaxConcurrentPositions"] = risk_manager_->get_max_concurrent_positions();
+        root["lihOneSlotGlobal"] = risk_manager_->get_lih_one_slot_global();
+        root["lihSessionMaxLegs"] = risk_manager_->get_lih_session_max_legs();
+        root["lihSessionLegsUsed"] = risk_manager_->get_lih_session_legs_used();
+        root["lihMinBalanceUsdc"] = risk_manager_->get_lih_min_balance_usdc();
 
         std::vector<MarketInfo> markets_snapshot;
         { std::shared_lock lock(market_mutex_); markets_snapshot = markets_; }
         std::unordered_map<std::string, TokenPrice> tokens_snapshot;
-        { std::shared_lock lock(token_mutex_); tokens_snapshot = token_prices_; }
+        std::unordered_map<std::string, TokenPrice> bids_snapshot;
+        { std::shared_lock lock(token_mutex_); tokens_snapshot = token_prices_; bids_snapshot = token_bids_; }
 
-        auto token_live = [&](const std::string& tid) -> double {
-            auto it = tokens_snapshot.find(tid);
-            return it != tokens_snapshot.end() ? it->second.price : 0.0;
+        auto token_mark = [&](const std::string& tid) -> double {
+            if (paper_mode_ && paper_official_book_) {
+                if (auto bid = get_official_mark_bid(tid)) return *bid;
+            }
+            auto bid = bids_snapshot.find(tid);
+            if (bid != bids_snapshot.end() && bid->second.price > 0.0) return bid->second.price;
+            auto ask = tokens_snapshot.find(tid);
+            return ask != tokens_snapshot.end() ? ask->second.price : 0.0;
+        };
+        auto token_buy = [&](const std::string& tid) -> double {
+            if (paper_mode_ && paper_official_book_) {
+                if (auto ask = get_official_buy_ask(tid)) return *ask;
+            }
+            auto ask = tokens_snapshot.find(tid);
+            return ask != tokens_snapshot.end() ? ask->second.price : 0.0;
         };
         auto find_market_for_token = [&](const std::string& tid) -> const MarketInfo* {
             for (const auto& m : markets_snapshot) {
@@ -295,11 +555,15 @@ std::string StateStore::get_dashboard_json() const {
             po["direction"] = p.direction.empty() ? (is_yes ? "UP" : "DOWN") : p.direction.c_str();
 
             if (m) {
-                po["yesLivePrice"] = token_live(m->yes_token_id);
-                po["noLivePrice"] = token_live(m->no_token_id);
+                po["yesLivePrice"] = token_mark(m->yes_token_id);
+                po["noLivePrice"] = token_mark(m->no_token_id);
+                po["yesBuyPrice"] = token_buy(m->yes_token_id);
+                po["noBuyPrice"] = token_buy(m->no_token_id);
             } else {
-                po["yesLivePrice"] = is_yes ? token_live(p.token_id) : 0.0;
-                po["noLivePrice"] = !is_yes ? token_live(p.token_id) : 0.0;
+                po["yesLivePrice"] = is_yes ? token_mark(p.token_id) : 0.0;
+                po["noLivePrice"] = !is_yes ? token_mark(p.token_id) : 0.0;
+                po["yesBuyPrice"] = is_yes ? token_buy(p.token_id) : 0.0;
+                po["noBuyPrice"] = !is_yes ? token_buy(p.token_id) : 0.0;
             }
 
             if (is_yes) {
@@ -318,8 +582,8 @@ std::string StateStore::get_dashboard_json() const {
                 po["yesCost"] = 0.0;
             }
 
-            auto live = get_token_price(p.token_id);
-            double unrealised = live ? (live->price - p.entry_price) * p.size_shares : 0.0;
+            auto live_px = token_mark(p.token_id);
+            double unrealised = live_px > 0.0 ? (live_px - p.entry_price) * p.size_shares : 0.0;
             po["pnl"] = unrealised;
             pos_arr.push_back(po);
         }
@@ -341,11 +605,67 @@ std::string StateStore::get_dashboard_json() const {
             po["noSize"] = p.size_shares;
             po["yesCost"] = p.yes_entry_price * p.size_shares;
             po["noCost"] = p.no_entry_price * p.size_shares;
-            po["yesLivePrice"] = token_live(p.yes_token_id);
-            po["noLivePrice"] = token_live(p.no_token_id);
+            po["yesLivePrice"] = token_mark(p.yes_token_id);
+            po["noLivePrice"] = token_mark(p.no_token_id);
+            po["yesBuyPrice"] = token_buy(p.yes_token_id);
+            po["noBuyPrice"] = token_buy(p.no_token_id);
             po["entryFee"] = compute_dh_entry_fee_per_share(
                 p.yes_entry_price, p.no_entry_price, p.yes_token_id, p.no_token_id) * p.size_shares;
-            po["pnl"] = p.locked_profit_usdc;
+            const double yes_bid = po["yesLivePrice"].as_double();
+            const double no_bid = po["noLivePrice"].as_double();
+            if (yes_bid > 0.0 && no_bid > 0.0) {
+                const double gross = (yes_bid + no_bid) * p.size_shares;
+                const double exit_fee = gross * fee_rate_;
+                const double entry_fee = po["entryFee"].as_double();
+                po["pnl"] = gross - exit_fee - p.combined_cost_usdc - entry_fee;
+            } else {
+                po["pnl"] = 0.0;
+            }
+            po["lockedPnl"] = p.locked_profit_usdc;
+            pos_arr.push_back(po);
+        }
+        for (const auto& [id, p] : risk_manager_->get_open_lih_positions()) {
+            boost::json::object po;
+            const double yes_avg = p.yes_shares > 0 ? p.yes_cost / p.yes_shares : 0.0;
+            const double no_avg = p.no_shares > 0 ? p.no_cost / p.no_shares : 0.0;
+            const double matched = std::min(p.yes_shares, p.no_shares);
+            po["asset"] = p.asset.c_str();
+            po["side"] = "LIH";
+            po["entryPrice"] = yes_avg + no_avg;
+            po["size"] = matched > 0 ? matched : std::max(p.yes_shares, p.no_shares);
+            po["cost"] = p.yes_cost + p.no_cost;
+            po["strategy"] = "LIH";
+            po["windowMinutes"] = p.window_minutes;
+            po["question"] = p.market_question.c_str();
+            po["endDateTs"] = p.end_date_ts;
+            po["heldSide"] = (p.yes_shares > p.no_shares + 1e-6) ? "YES"
+                : (p.no_shares > p.yes_shares + 1e-6) ? "NO" : "BOTH";
+            po["yesEntryPrice"] = yes_avg;
+            po["noEntryPrice"] = no_avg;
+            po["yesSize"] = p.yes_shares;
+            po["noSize"] = p.no_shares;
+            po["yesCost"] = p.yes_cost;
+            po["noCost"] = p.no_cost;
+            po["rebalanceCount"] = p.rebalance_count;
+            po["gap"] = std::abs(p.yes_shares - p.no_shares);
+            po["yesLivePrice"] = token_mark(p.yes_token_id);
+            po["noLivePrice"] = token_mark(p.no_token_id);
+            po["yesBuyPrice"] = token_buy(p.yes_token_id);
+            po["noBuyPrice"] = token_buy(p.no_token_id);
+            po["entryFee"] = (p.yes_cost + p.no_cost) * fee_rate_;
+            const double excess_yes = std::max(0.0, p.yes_shares - matched);
+            const double excess_no = std::max(0.0, p.no_shares - matched);
+            double unrealised = 0.0;
+            if (matched > 0.0) {
+                unrealised += matched * (1.0 - yes_avg - no_avg);
+            }
+            if (excess_yes > 0.0 && po["yesLivePrice"].as_double() > 0.0) {
+                unrealised += excess_yes * (po["yesLivePrice"].as_double() - yes_avg);
+            }
+            if (excess_no > 0.0 && po["noLivePrice"].as_double() > 0.0) {
+                unrealised += excess_no * (po["noLivePrice"].as_double() - no_avg);
+            }
+            po["pnl"] = unrealised;
             pos_arr.push_back(po);
         }
         root["openPositions"] = std::move(pos_arr);
@@ -354,10 +674,17 @@ std::string StateStore::get_dashboard_json() const {
         struct HistRow { double sort_ts; boost::json::object obj; };
         std::vector<HistRow> hist_rows;
         const double fr = fee_rate_;
+        const double baseline = trades_baseline_ts_;
+
+        auto after_baseline = [&](double ts) {
+            return baseline <= 0 || ts <= 0 || ts >= baseline;
+        };
 
         auto push_hist = [&](HistRow row) { hist_rows.push_back(std::move(row)); };
 
         for (const auto& p : risk_manager_->get_closed_positions()) {
+            const double ts = p.closed_at.value_or(p.opened_at);
+            if (!after_baseline(ts)) continue;
             boost::json::object h;
             h["id"] = p.order_id.c_str();
             h["strategy"] = p.strategy.c_str();
@@ -381,6 +708,8 @@ std::string StateStore::get_dashboard_json() const {
         }
 
         for (const auto& p : risk_manager_->get_closed_dh_positions()) {
+            const double ts = p.closed_at.value_or(p.opened_at);
+            if (!after_baseline(ts)) continue;
             boost::json::object h;
             h["id"] = p.dh_id.c_str();
             h["strategy"] = "DH";
@@ -410,8 +739,46 @@ std::string StateStore::get_dashboard_json() const {
             push_hist({p.closed_at.value_or(p.opened_at), std::move(h)});
         }
 
+        for (const auto& p : risk_manager_->get_closed_lih_positions()) {
+            const double ts = p.closed_at.value_or(p.opened_at);
+            if (!after_baseline(ts)) continue;
+            const double yes_avg = p.yes_shares > 0 ? p.yes_cost / p.yes_shares : 0.0;
+            const double no_avg = p.no_shares > 0 ? p.no_cost / p.no_shares : 0.0;
+            const double matched = std::min(p.yes_shares, p.no_shares);
+            const double yes_exit = p.yes_exit_price.value_or(0.0);
+            const double no_exit = p.no_exit_price.value_or(0.0);
+            boost::json::object h;
+            h["id"] = p.lih_id.c_str();
+            h["strategy"] = "LIH";
+            h["asset"] = p.asset.c_str();
+            h["status"] = "closed";
+            h["market"] = p.market_question.c_str();
+            h["side"] = "LIH";
+            h["direction"] = "LEG-IN";
+            h["yesEntryPrice"] = yes_avg;
+            h["noEntryPrice"] = no_avg;
+            h["entryPrice"] = yes_avg + no_avg;
+            h["yesExitPrice"] = yes_exit;
+            h["noExitPrice"] = no_exit;
+            h["exitPrice"] = yes_exit + no_exit;
+            h["size"] = matched > 0 ? matched : std::max(p.yes_shares, p.no_shares);
+            h["costUsdc"] = p.yes_cost + p.no_cost;
+            h["entryFee"] = (p.yes_cost + p.no_cost) * fr;
+            const double gross = yes_exit * p.yes_shares + no_exit * p.no_shares;
+            h["exitFee"] = gross * fr;
+            h["pnlUsdc"] = p.pnl_usdc.value_or(0.0);
+            h["openedAt"] = p.opened_at;
+            h["closedAt"] = p.closed_at.value_or(0.0);
+            h["endDateTs"] = p.end_date_ts;
+            h["exitReason"] = p.exit_reason.c_str();
+            h["isPaperMode"] = p.paper_mode;
+            h["windowMinutes"] = p.window_minutes;
+            push_hist({p.closed_at.value_or(p.opened_at), std::move(h)});
+        }
+
         for (const auto& [id, p] : risk_manager_->get_open_positions()) {
             if (p.strategy == "LA") continue;
+            if (!after_baseline(p.opened_at)) continue;
             boost::json::object h;
             h["id"] = id.c_str();
             h["strategy"] = p.strategy.c_str();
@@ -438,6 +805,7 @@ std::string StateStore::get_dashboard_json() const {
         }
 
         for (const auto& [id, p] : risk_manager_->get_open_dh_positions()) {
+            if (!after_baseline(p.opened_at)) continue;
             boost::json::object h;
             h["id"] = id.c_str();
             h["strategy"] = "DH";
@@ -464,6 +832,44 @@ std::string StateStore::get_dashboard_json() const {
             push_hist({p.opened_at, std::move(h)});
         }
 
+        for (const auto& [id, p] : risk_manager_->get_open_lih_positions()) {
+            if (!after_baseline(p.opened_at)) continue;
+            const double yes_avg = p.yes_shares > 0 ? p.yes_cost / p.yes_shares : 0.0;
+            const double no_avg = p.no_shares > 0 ? p.no_cost / p.no_shares : 0.0;
+            const double matched = std::min(p.yes_shares, p.no_shares);
+            boost::json::object h;
+            h["id"] = id.c_str();
+            h["strategy"] = "LIH";
+            h["asset"] = p.asset.c_str();
+            h["status"] = "open";
+            h["market"] = p.market_question.c_str();
+            h["side"] = "LIH";
+            h["direction"] = "LEG-IN";
+            h["yesEntryPrice"] = yes_avg;
+            h["noEntryPrice"] = no_avg;
+            h["entryPrice"] = yes_avg + no_avg;
+            h["size"] = matched > 0 ? matched : std::max(p.yes_shares, p.no_shares);
+            h["costUsdc"] = p.yes_cost + p.no_cost;
+            h["entryFee"] = (p.yes_cost + p.no_cost) * fr;
+            h["exitFee"] = 0.0;
+            const double yes_bid = token_mark(p.yes_token_id);
+            const double no_bid = token_mark(p.no_token_id);
+            double unreal = 0.0;
+            if (matched > 0.0) unreal += matched * (1.0 - yes_avg - no_avg);
+            const double excess_yes = std::max(0.0, p.yes_shares - matched);
+            const double excess_no = std::max(0.0, p.no_shares - matched);
+            if (excess_yes > 0.0 && yes_bid > 0.0) unreal += excess_yes * (yes_bid - yes_avg);
+            if (excess_no > 0.0 && no_bid > 0.0) unreal += excess_no * (no_bid - no_avg);
+            h["pnlUsdc"] = unreal;
+            h["openedAt"] = p.opened_at;
+            h["closedAt"] = 0.0;
+            h["endDateTs"] = p.end_date_ts;
+            h["exitReason"] = "";
+            h["isPaperMode"] = p.paper_mode;
+            h["windowMinutes"] = p.window_minutes;
+            push_hist({p.opened_at, std::move(h)});
+        }
+
         std::sort(hist_rows.begin(), hist_rows.end(),
                   [](const HistRow& a, const HistRow& b) { return a.sort_ts > b.sort_ts; });
         boost::json::array hist_arr;
@@ -479,9 +885,11 @@ std::string StateStore::get_dashboard_json() const {
         root["openCount"] = 0;
         root["totalTrades"] = 0;
         root["totalDhTrades"] = 0;
+        root["totalLihTrades"] = 0;
         root["winRate"] = 0.0;
         root["laPnl"] = 0.0;
         root["dhPnl"] = 0.0;
+        root["lihPnl"] = 0.0;
         root["status"] = 0;
         root["openPositions"] = boost::json::array{};
         root["tradeHistory"] = boost::json::array{};
@@ -526,7 +934,8 @@ std::string StateStore::get_dashboard_json() const {
         }
     }
     root["marketsScanned"] = static_cast<int>(opps.size());
-    root["dhOpportunities"] = std::move(opps);
+    root["dhOpportunities"] = opps;
+    root["marketOpportunities"] = opps;
 
     // Telemetry & signal logs
     {
@@ -571,6 +980,53 @@ std::optional<TokenPrice> StateStore::get_token_bid(std::string_view token_id) c
     auto it = token_bids_.find(std::string(token_id));
     if (it != token_bids_.end()) return it->second;
     return std::nullopt;
+}
+
+void StateStore::reload_live_mirror(double max_age_sec) {
+    if (mirror_path_.empty()) return;
+    std::ifstream in(mirror_path_);
+    if (!in.is_open()) return;
+    std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (body.empty()) return;
+    try {
+        auto jv = boost::json::parse(body);
+        if (!jv.is_object()) return;
+        const auto& root = jv.as_object();
+        const double updated = root.contains("updated_at") ? root.at("updated_at").as_double() : 0.0;
+        const double now = std::chrono::duration<double>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        if (updated > 0 && (now - updated) > max_age_sec) return;
+
+        std::unordered_map<std::string, MirrorAssetQuote> parsed;
+        if (root.contains("assets") && root.at("assets").is_object()) {
+            for (const auto& kv : root.at("assets").as_object()) {
+                if (!kv.value().is_object()) continue;
+                const auto& o = kv.value().as_object();
+                MirrorAssetQuote q;
+                if (o.contains("book_yes")) q.book_yes = o.at("book_yes").as_double();
+                if (o.contains("book_no")) q.book_no = o.at("book_no").as_double();
+                if (o.contains("ws_yes")) q.ws_yes = o.at("ws_yes").as_double();
+                if (o.contains("ws_no")) q.ws_no = o.at("ws_no").as_double();
+                q.updated_at = updated;
+                q.fresh = (q.book_yes > 0 || q.ws_yes > 0) && (q.book_no > 0 || q.ws_no > 0);
+                parsed[std::string(kv.key())] = q;
+            }
+        }
+        std::unique_lock lock(mirror_mutex_);
+        mirror_by_asset_ = std::move(parsed);
+        mirror_loaded_at_ = now;
+    } catch (...) {
+        return;
+    }
+}
+
+std::optional<StateStore::MirrorAssetQuote> StateStore::get_mirror_quote(const std::string& asset) const {
+    std::shared_lock lock(mirror_mutex_);
+    std::string key = asset;
+    std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+    auto it = mirror_by_asset_.find(key);
+    if (it == mirror_by_asset_.end()) return std::nullopt;
+    return it->second;
 }
 
 } // namespace trading

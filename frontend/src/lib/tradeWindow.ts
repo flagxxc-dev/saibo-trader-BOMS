@@ -12,7 +12,7 @@ export function tradeWindowLabel(minutes: number): string {
 }
 
 export function isHedgeTrade(strategy: string): boolean {
-  return strategy === "DH" || strategy === "HEDGE";
+  return strategy === "DH" || strategy === "HEDGE" || strategy === "LIH";
 }
 
 export function resolveTradeWindow(market: string, windowMinutes?: number): number {

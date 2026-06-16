@@ -1,25 +1,34 @@
 import NextAuth, { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
+import { headers } from "next/headers";
+import type { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import bcrypt from "bcryptjs";
+import { validatePassword, validateUsername } from "@/lib/inputSecurity";
+import {
+  clearLoginFailures,
+  getClientIpFromHeaders,
+  getClientIpFromRequest,
+  recordFailedLogin,
+  shouldSilenceAuth,
+  silentAuthResponse,
+} from "@/lib/ipGuard";
 
 async function verifyCredentials(username: string, password: string) {
+  const safeUser = validateUsername(username);
+  const safePass = validatePassword(password);
+  if (!safeUser || !safePass) return null;
+
   const user = await prisma.user.findUnique({
-    where: { email: username },
+    where: { email: safeUser },
   });
 
-  if (user) {
-    const ok = await bcrypt.compare(password, user.password);
-    if (ok) return { id: user.id, email: user.email };
-  }
+  if (!user) return null;
 
-  const envUser = process.env.AUTH_USERNAME?.trim();
-  const envPass = process.env.AUTH_PASSWORD?.trim();
-  if (envUser && envPass && username === envUser && password === envPass) {
-    return { id: "env-admin", email: envUser };
-  }
+  const ok = await bcrypt.compare(safePass, user.password);
+  if (!ok) return null;
 
-  return null;
+  return { id: user.id, email: user.email };
 }
 
 export const authOptions: NextAuthOptions = {
@@ -31,10 +40,25 @@ export const authOptions: NextAuthOptions = {
         password: { label: "密码", type: "password" },
       },
       async authorize(credentials) {
+        const headerList = await headers();
+        const ip = getClientIpFromHeaders(headerList);
+        if (shouldSilenceAuth(ip)) return null;
+
         const username = credentials?.username?.trim();
         const password = credentials?.password ?? "";
-        if (!username || !password) return null;
-        return verifyCredentials(username, password);
+        if (!username || !password) {
+          recordFailedLogin(ip);
+          return null;
+        }
+
+        const user = await verifyCredentials(username, password);
+        if (!user) {
+          recordFailedLogin(ip);
+          return null;
+        }
+
+        clearLoginFailures(ip);
+        return user;
       },
     }),
   ],
@@ -66,4 +90,22 @@ export const authOptions: NextAuthOptions = {
 
 const handler = NextAuth(authOptions);
 
-export { handler as GET, handler as POST };
+function isCredentialsCallback(req: NextRequest) {
+  return req.nextUrl.pathname.includes("/callback/credentials");
+}
+
+export async function GET(req: NextRequest, ctx: { params: Promise<{ nextauth: string[] }> }) {
+  const ip = getClientIpFromRequest(req);
+  if (shouldSilenceAuth(ip)) return silentAuthResponse();
+  return handler(req, ctx);
+}
+
+export async function POST(req: NextRequest, ctx: { params: Promise<{ nextauth: string[] }> }) {
+  const ip = getClientIpFromRequest(req);
+  if (shouldSilenceAuth(ip)) return silentAuthResponse();
+  const response = await handler(req, ctx);
+  if (isCredentialsCallback(req) && shouldSilenceAuth(ip)) {
+    return silentAuthResponse();
+  }
+  return response;
+}

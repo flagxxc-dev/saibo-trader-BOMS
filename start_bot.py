@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 
 from live_preflight import PREFLIGHT_PATH, print_report, run_preflight
 
+PRELIVE_PATH = Path(os.getenv("PRELIVE_LIH_PATH", "logs/prelive_lih.json"))
+
 
 def _env_bool(key: str, default: bool = True) -> bool:
     raw = os.getenv(key, "").strip().lower()
@@ -34,24 +36,39 @@ def _enabled_assets(prefix: str, assets: tuple[str, ...]) -> str:
 def print_config_summary() -> None:
     load_dotenv()
     paper = _env_bool("PAPER_MODE", True)
+    lih = _env_bool("LIH_ENABLED", True)
     mode = "纸面 PAPER" if paper else "实盘 LIVE"
+    strategy = "LIH 分腿对冲" if lih else "DH 结构对冲（遗留）"
 
     print("=" * 60)
-    print(f"  运行配置摘要  |  {mode}")
+    print(f"  运行配置摘要  |  {mode}  |  {strategy}")
     print("=" * 60)
     print(f"  WS   : ws://{os.getenv('WS_HOST', '0.0.0.0')}:{os.getenv('WS_PORT', '8080')}")
-    print(f"  API  : http://{os.getenv('WS_HOST', '0.0.0.0')}:{os.getenv('HTTP_PORT', '8081')}")
+    http_bind = os.getenv("HTTP_BIND", "127.0.0.1")
+    print(f"  API  : http://{http_bind}:{os.getenv('HTTP_PORT', '8081')}")
     print(f"  5m   : {'开' if _env_bool('DH_ENABLE_5M') else '关'}  →  {_enabled_assets('DH_ENABLE_5M', ('btc', 'eth', 'sol'))}")
     print(f"  15m  : {'开' if _env_bool('DH_ENABLE_15M') else '关'}  →  {_enabled_assets('DH_ENABLE_15M', ('btc', 'eth'))}")
-    print(
-        f"  DH   : sum≤{os.getenv('DH_SUM_TARGET', '0.95')}  "
-        f"disc≥{os.getenv('DH_MIN_DISCOUNT', '0.03')}  "
-        f"cd={os.getenv('DH_COOLDOWN_SECONDS', '30')}s"
-    )
+    if lih:
+        dry = _env_bool("LIVE_LIH_DRY_RUN", True)
+        print(
+            f"  LIH  : leg1≤{os.getenv('LIH_LEG1_MAX_PRICE', '0.45')}  "
+            f"target={os.getenv('LIH_TARGET_COMBINED', '0.95')}  "
+            f"shares={os.getenv('LIH_LEG1_SHARES', '10')}  "
+            f"force={os.getenv('LIH_FORCE_BALANCE_SECS', '45')}s"
+        )
+        if not paper:
+            print(f"         live shadow (LIVE_LIH_DRY_RUN)={'开' if dry else '关 — 会真下单'}")
+    else:
+        print(
+            f"  DH   : sum≤{os.getenv('DH_SUM_TARGET', '0.95')}  "
+            f"disc≥{os.getenv('DH_MIN_DISCOUNT', '0.03')}  "
+            f"cd={os.getenv('DH_COOLDOWN_SECONDS', '30')}s"
+        )
     print(
         f"  风控 : pos={os.getenv('RISK_MAX_POSITION_FRACTION', '0.08')}  "
         f"daily={os.getenv('RISK_DAILY_LOSS_LIMIT', '0.20')}  "
-        f"max_pos={os.getenv('RISK_MAX_CONCURRENT_POSITIONS', '3')}"
+        f"max_pos={os.getenv('RISK_MAX_CONCURRENT_POSITIONS', '3')}  "
+        f"slot_cap={os.getenv('LIH_MAX_USDC_PER_SLOT', '0') or 'bal×pos'}"
     )
     if not paper:
         funder = os.getenv("POLYMARKET_FUNDER", "")
@@ -68,12 +85,50 @@ def run_preflight_step() -> dict:
     return report
 
 
+def run_prelive_step(*, allow_live: bool = False, min_shadow_leg1: int = 0, live_dry: bool | None = None) -> dict:
+    from prelive_lih_check import print_report as print_prelive
+    from prelive_lih_check import run_prelive_check
+
+    if live_dry is None:
+        load_dotenv()
+        live_dry = _env_bool("LIVE_LIH_DRY_RUN", True)
+
+    since_h = float(os.getenv("PRELIVE_LOG_HOURS", "24") or "24")
+    report = run_prelive_check(
+        require_shadow=not allow_live,
+        min_shadow_leg1=min_shadow_leg1,
+        since_hours=since_h if live_dry else 0.0,
+        since_baseline=not live_dry,
+    )
+    PRELIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PRELIVE_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print_prelive(report)
+    return report
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="启动 bot（自检 + 配置摘要 + bridge/core）")
     parser.add_argument("--skip-preflight", action="store_true", help="跳过自检（Docker entrypoint 已跑过时）")
+    parser.add_argument("--skip-prelive", action="store_true", help="跳过 LIH prelive（日常重启用）")
     parser.add_argument("--preflight-only", action="store_true", help="只跑自检并退出")
+    parser.add_argument("--prelive-only", action="store_true", help="只跑 LIH 上线前安全检查")
+    parser.add_argument(
+        "--allow-live",
+        action="store_true",
+        help="prelive 不强制 LIVE_LIH_DRY_RUN=true（真下单前用）",
+    )
+    parser.add_argument(
+        "--min-shadow-leg1",
+        type=int,
+        default=0,
+        help="prelive 要求日志中至少 N 条 LEG1 样本",
+    )
     parser.add_argument("--json-only", action="store_true", help="只输出自检 JSON（供脚本用）")
     args = parser.parse_args()
+
+    if args.prelive_only:
+        report = run_prelive_step(allow_live=args.allow_live, min_shadow_leg1=args.min_shadow_leg1)
+        return 0 if report.get("ok") else 1
 
     if args.preflight_only or args.json_only:
         report = run_preflight()
@@ -101,6 +156,27 @@ def main() -> int:
                 print(f"[preflight] 使用已有报告 ({mode}) ok={ok}", file=sys.stderr)
             except Exception:
                 pass
+
+    load_dotenv()
+    paper = _env_bool("PAPER_MODE", True)
+    lih = _env_bool("LIH_ENABLED", True)
+    live_dry = _env_bool("LIVE_LIH_DRY_RUN", True)
+    skip_prelive = args.skip_prelive or _env_bool("START_SKIP_PRELIVE", False)
+    if not paper and lih and not skip_prelive:
+        allow = args.allow_live or not live_dry
+        min_samples = args.min_shadow_leg1 if not live_dry else max(args.min_shadow_leg1, 1)
+        prelive = run_prelive_step(
+            allow_live=allow,
+            min_shadow_leg1=min_samples if not live_dry else args.min_shadow_leg1,
+            live_dry=live_dry,
+        )
+        if not live_dry and not prelive.get("ok"):
+            print("❌ LIH 上线前检查未通过，已中止启动。先 shadow 观察或修日志中的重复 LEG1。", file=sys.stderr)
+            return 1
+        if live_dry and not prelive.get("ok"):
+            print("⚠️  LIH prelive 有警告（shadow 模式仍启动，请先处理重复 LEG1）", file=sys.stderr)
+    elif skip_prelive and not paper and lih:
+        print("[prelive] 跳过（START_SKIP_PRELIVE / --skip-prelive）", file=sys.stderr)
 
     print_config_summary()
     os.environ["PREFLIGHT_SKIP"] = "1"

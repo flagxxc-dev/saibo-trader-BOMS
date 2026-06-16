@@ -69,24 +69,30 @@ def fetch_token_fee_rate_bps(token_id: str, timeout: float = 10.0) -> int:
 
 
 def sample_updown_market(timeout: float = 12.0) -> dict[str, Any] | None:
-    """Pick one active BTC 5m market for fee / preflight samples."""
+    """Pick one active BTC 5m market for fee / preflight samples (matches C++ slug probe)."""
+    import json
+    import time
+
     url = f"{GAMMA_HOST}/events"
-    params = {"slug": "btc-updown-5m", "active": "true", "closed": "false", "limit": 5}
+    now = int(time.time())
+    window = 300
+    # Try current and next 5m window slugs (Polymarket uses btc-updown-5m-{unix_ts})
+    candidates = [now // window * window, (now // window + 1) * window]
     try:
-        res = requests.get(url, params=params, timeout=timeout)
-        res.raise_for_status()
-        events = res.json()
-        if not events:
-            return None
-        for ev in events:
+        for ts in candidates:
+            slug = f"btc-updown-5m-{ts}"
+            res = requests.get(url, params={"slug": slug, "limit": 1}, timeout=timeout)
+            res.raise_for_status()
+            events = res.json()
+            if not events:
+                continue
+            ev = events[0]
             markets = ev.get("markets") or []
             if not markets:
                 continue
             m = markets[0]
             tokens = m.get("clobTokenIds") or m.get("clob_token_ids")
             if isinstance(tokens, str):
-                import json
-
                 tokens = json.loads(tokens)
             if not tokens or len(tokens) < 2:
                 continue

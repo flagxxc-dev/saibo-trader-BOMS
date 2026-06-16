@@ -22,6 +22,11 @@ BOOL_KEYS = frozenset({
     "DH_ENABLE_5M_SOL",
     "DH_ENABLE_15M_BTC",
     "DH_ENABLE_15M_ETH",
+    "LIH_ENABLED",
+    "LIH_DISABLE_DH",
+    "LIH_USE_MIRROR",
+    "LIH_ALLOW_OVER_TARGET",
+    "LIH_ONE_SLOT_GLOBAL",
 })
 
 ALLOWED_KEYS = {
@@ -36,6 +41,27 @@ ALLOWED_KEYS = {
     "DH_ENABLE_5M_SOL",
     "DH_ENABLE_15M_BTC",
     "DH_ENABLE_15M_ETH",
+    "LIH_ENABLED",
+    "LIH_DISABLE_DH",
+    "LIH_USE_MIRROR",
+    "LIH_LEG1_MAX_PRICE",
+    "LIH_TARGET_COMBINED",
+    "LIH_MIN_SECONDS_REMAINING",
+    "LIH_LEG1_MIN_SECONDS_REMAINING",
+    "LIH_COOLDOWN_SECONDS",
+    "LIH_LEG1_COOLDOWN_SECONDS",
+    "LIH_REBALANCE_COOLDOWN_SECONDS",
+    "LIH_LEG1_SHARES",
+    "LIH_MAX_REBALANCE_SHARES",
+    "LIH_MAX_MATCHED_SHARES",
+    "LIH_MAX_USDC_PER_SLOT",
+    "LIH_FORCE_BALANCE_SECS",
+    "LIH_FLEX_DILUTE_RATIO",
+    "LIH_ALLOW_OVER_TARGET",
+    "LIH_REBALANCE_MODE",
+    "LIH_ONE_SLOT_GLOBAL",
+    "LIH_SESSION_MAX_LEGS",
+    "LIH_MIN_BALANCE_USDC",
     "RISK_MAX_POSITION_FRACTION",
     "RISK_DAILY_LOSS_LIMIT",
     "RISK_TOTAL_DRAWDOWN_KILL",
@@ -45,6 +71,28 @@ ALLOWED_KEYS = {
 }
 
 PUBLIC_CONFIG_KEYS = sorted(ALLOWED_KEYS)
+
+
+def _sanitize_audit_label(text: str, *, max_len: int = 64, default: str = "web") -> str:
+    s = str(text or default).strip()[:max_len]
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]+", s):
+        return default
+    lowered = s.lower()
+    for token in ("union", "select", "insert", "update", "delete", "drop", "alter", "exec", "--", "/*"):
+        if token in lowered:
+            return default
+    return s
+
+
+def _sanitize_audit_reason(text: str) -> str:
+    s = str(text or "").strip()[:200]
+    if not s:
+        return ""
+    lowered = s.lower()
+    for token in ("union", "select", "insert", "update", "delete", "drop", "--", "/*", ";"):
+        if token in lowered:
+            return ""
+    return s
 
 
 def _ensure_parent(path: Path) -> None:
@@ -107,14 +155,28 @@ def _validate_patch(patch: dict[str, Any]) -> dict[str, str]:
             text = _parse_bool(text)
         elif key == "RISK_MAX_CONCURRENT_POSITIONS":
             n = int(_parse_float(text, key))
-            if n < 1 or n > 50:
-                raise ValueError("RISK_MAX_CONCURRENT_POSITIONS must be 1-50")
+            if n < 0 or n > 50:
+                raise ValueError("RISK_MAX_CONCURRENT_POSITIONS must be 0-50 (0 = no new leg1, rebalance only)")
             text = str(n)
         elif key.startswith("RISK_") or key in (
             "DH_SUM_TARGET",
             "DH_MIN_DISCOUNT",
             "DH_COOLDOWN_SECONDS",
             "DH_MIN_SECONDS_REMAINING",
+            "LIH_LEG1_MAX_PRICE",
+            "LIH_TARGET_COMBINED",
+            "LIH_MIN_SECONDS_REMAINING",
+            "LIH_LEG1_MIN_SECONDS_REMAINING",
+            "LIH_COOLDOWN_SECONDS",
+            "LIH_LEG1_COOLDOWN_SECONDS",
+            "LIH_REBALANCE_COOLDOWN_SECONDS",
+            "LIH_LEG1_SHARES",
+            "LIH_MAX_REBALANCE_SHARES",
+            "LIH_MAX_MATCHED_SHARES",
+            "LIH_FORCE_BALANCE_SECS",
+            "LIH_FLEX_DILUTE_RATIO",
+            "LIH_SESSION_MAX_LEGS",
+            "LIH_MIN_BALANCE_USDC",
             "FEE_RATE",
         ):
             num = _parse_float(text, key)
@@ -130,9 +192,34 @@ def _validate_patch(patch: dict[str, Any]) -> dict[str, str]:
                 raise ValueError("DH_MIN_DISCOUNT must be 0.0-0.5")
             if key == "FEE_RATE" and not (0.0 <= num <= 0.1):
                 raise ValueError("FEE_RATE must be 0.0-0.1")
-            if key in ("DH_COOLDOWN_SECONDS", "DH_MIN_SECONDS_REMAINING") and num < 0:
+            if key in (
+                "DH_COOLDOWN_SECONDS",
+                "DH_MIN_SECONDS_REMAINING",
+                "LIH_COOLDOWN_SECONDS",
+                "LIH_LEG1_COOLDOWN_SECONDS",
+                "LIH_REBALANCE_COOLDOWN_SECONDS",
+                "LIH_MIN_SECONDS_REMAINING",
+                "LIH_LEG1_MIN_SECONDS_REMAINING",
+            ) and num < 0:
                 raise ValueError(f"{key} must be >= 0")
+            if key in ("LIH_LEG1_SHARES", "LIH_MAX_REBALANCE_SHARES", "LIH_MAX_MATCHED_SHARES") and num < 0:
+                raise ValueError(f"{key} must be >= 0")
+            if key == "LIH_MAX_USDC_PER_SLOT" and num < 0:
+                raise ValueError("LIH_MAX_USDC_PER_SLOT must be >= 0")
+            if key == "LIH_FORCE_BALANCE_SECS" and num < 0:
+                raise ValueError(f"{key} must be >= 0")
+            if key == "LIH_SESSION_MAX_LEGS" and (num < 0 or num > 20):
+                raise ValueError("LIH_SESSION_MAX_LEGS must be 0-20 (0 = unlimited)")
+            if key == "LIH_MIN_BALANCE_USDC" and num < 0:
+                raise ValueError("LIH_MIN_BALANCE_USDC must be >= 0 (0 = off)")
+            if key == "LIH_FLEX_DILUTE_RATIO" and not (0.0 < num <= 1.0):
+                raise ValueError("LIH_FLEX_DILUTE_RATIO must be 0-1")
             text = str(num)
+        elif key == "LIH_REBALANCE_MODE":
+            mode = text.lower()
+            if mode not in ("flex", "simple"):
+                raise ValueError("LIH_REBALANCE_MODE must be flex or simple")
+            text = mode
         cleaned[key] = text
     return cleaned
 
@@ -198,3 +285,28 @@ def write_runtime_config(payload: dict[str, Any]) -> None:
     if "patch" in out and isinstance(out["patch"], dict):
         out["patch"] = {k: str(v) for k, v in out["patch"].items()}
     RUNTIME_CONFIG_PATH.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+
+
+def clear_live_trades_history(path: Path | None = None) -> dict[str, str]:
+    """Reset live trade history baseline to now and archive persisted live LIH state."""
+    path = path or ENV_PATH
+    ts = str(int(time.time()))
+    lines: list[str] = []
+    seen = False
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("LIVE_TRADES_BASELINE_TS="):
+                lines.append(f"LIVE_TRADES_BASELINE_TS={ts}")
+                seen = True
+            else:
+                lines.append(line)
+    if not seen:
+        lines.append(f"LIVE_TRADES_BASELINE_TS={ts}")
+    _ensure_parent(path)
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+    live_state = Path(os.getenv("LIVE_STATE_PATH", "logs/live_state.json"))
+    if live_state.is_file():
+        backup = live_state.with_name(f"live_state.json.bak.{ts}")
+        live_state.rename(backup)
+    return {"LIVE_TRADES_BASELINE_TS": ts}

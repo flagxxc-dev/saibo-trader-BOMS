@@ -15,6 +15,7 @@
 #include "feeds/GammaClient.h"
 #include "risk/RiskManager.h"
 #include "signals/DumpHedgeDetector.h"
+#include "signals/LegInHedgeDetector.h"
 #include "exec/OrderRouter.h"
 #include "state/PaperStateStore.h"
 #include <spdlog/sinks/basic_file_sink.h>
@@ -258,9 +259,158 @@ static void attempt_onchain_redeem_async(
     }).detach();
 }
 
+static double apply_paper_slippage(double price, bool is_buy, double slip_pct) {
+    if (slip_pct <= 0.0 || price <= 0.0) return price;
+    return is_buy ? price * (1.0 + slip_pct) : price * (1.0 - slip_pct);
+}
+
+static bool paper_hedge_liquidity_miss(const std::string& token_id, double now_sec, double rate) {
+    if (rate <= 0.0) return false;
+    const auto bucket = static_cast<int64_t>(now_sec);
+    const std::string seed = token_id + "|" + std::to_string(bucket);
+    const size_t h = std::hash<std::string>{}(seed);
+    return (h % 10000) < static_cast<size_t>(rate * 10000.0 + 0.5);
+}
+
+static double paper_action_extra_slip(const StateStore& store, const LegInAction& act) {
+    if (!store.paper_realism_enabled()) return 0.0;
+    if (act.kind == LegInAction::Kind::OpenLeg1) {
+        return store.paper_leg1_extra_slip_pct();
+    }
+    if (act.kind == LegInAction::Kind::CompleteHedge) {
+        double extra = store.paper_hedge_extra_slip_pct();
+        if (act.note.find("force") != std::string::npos) {
+            extra += store.paper_force_extra_slip_pct();
+        }
+        return extra;
+    }
+    return 0.0;
+}
+
+static double env_double_or(const std::unordered_map<std::string, std::string>& env,
+                            const char* key, double fallback) {
+    auto it = env.find(key);
+    if (it == env.end() || it->second.empty()) return fallback;
+    try {
+        return std::stod(it->second);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+static std::optional<std::pair<double, double>> try_binary_settlement_prices(
+    GammaClient& gamma,
+    StateStore& store,
+    const std::string& condition_id,
+    const std::string& yes_token_id,
+    const std::string& no_token_id,
+    const std::string& asset_label) {
+    if (!condition_id.empty()) {
+        if (auto out = gamma.fetch_settlement_outcomes(condition_id)) {
+            if (out->resolved && out->yes_payout + out->no_payout == 1.0) {
+                spdlog::info("{} settle {} | official YES={:.0f} NO={:.0f}",
+                             asset_label, condition_id.substr(0, 12),
+                             out->yes_payout, out->no_payout);
+                return {{out->yes_payout, out->no_payout}};
+            }
+        }
+    }
+
+    auto mark = [&](const std::string& tid) -> std::optional<double> {
+        if (auto b = store.get_official_mark_bid(tid); b && *b > 0.0) return b;
+        if (auto b = store.get_token_bid(tid); b && b->price > 0.0) return b->price;
+        return gamma.fetch_token_price(tid, "SELL");
+    };
+
+    auto yp = mark(yes_token_id);
+    auto np = mark(no_token_id);
+    if (yp) {
+        if (*yp >= 0.85) return {{1.0, 0.0}};
+        if (*yp <= 0.15) return {{0.0, 1.0}};
+    }
+    if (np) {
+        if (*np >= 0.85) return {{0.0, 1.0}};
+        if (*np <= 0.15) return {{1.0, 0.0}};
+    }
+    if (yp && np) {
+        if (*yp >= 0.65 && *np <= 0.35) return {{1.0, 0.0}};
+        if (*np >= 0.65 && *yp <= 0.35) return {{0.0, 1.0}};
+    }
+    return std::nullopt;
+}
+
+static std::pair<double, double> official_settlement_prices(
+    GammaClient& gamma,
+    StateStore& store,
+    const std::string& condition_id,
+    const std::string& yes_token_id,
+    const std::string& no_token_id,
+    const std::string& asset_label) {
+    if (auto p = try_binary_settlement_prices(
+            gamma, store, condition_id, yes_token_id, no_token_id, asset_label)) {
+        return *p;
+    }
+    spdlog::warn("{} | resolution unknown — marking 0.5/0.5 (hedged fallback)", asset_label);
+    return {0.5, 0.5};
+}
+
+void check_and_close_lih_positions(
+    risk::RiskManager& risk_manager,
+    StateStore& store,
+    GammaClient& gamma,
+    bool auto_redeem_enabled) {
+    const double now = std::chrono::duration<double>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    auto open = risk_manager.get_open_lih_positions();
+    for (const auto& [id, p] : open) {
+        if (now < p.end_date_ts) continue;
+
+        const double matched = std::min(p.yes_shares, p.no_shares);
+        const bool fully_hedged = matched > 0 && std::abs(p.yes_shares - p.no_shares) < 1e-6;
+
+        auto prices = try_binary_settlement_prices(
+            gamma, store, p.condition_id, p.yes_token_id, p.no_token_id, "LIH " + p.asset);
+        if (!prices) {
+            if (!fully_hedged) {
+                const double overdue = now - p.end_date_ts;
+                spdlog::warn("[LIH] {} unhedged settlement deferred ({:.0f}s past expiry) — need 0/1 resolution",
+                             p.asset, overdue);
+                store.push_telemetry(fmt::format(
+                    "[LIH] SETTLE {} deferred | unhedged yes={:.2f} no={:.2f} | awaiting winner",
+                    p.asset, p.yes_shares, p.no_shares));
+                continue;
+            }
+            spdlog::warn("[LIH] {} hedged settlement unknown — 0.5/0.5 fallback", p.asset);
+            prices = {{0.5, 0.5}};
+        }
+
+        const auto [ey, en] = *prices;
+        const bool is_live = !p.paper_mode;
+        const std::string condition_id = p.condition_id;
+        if (fully_hedged) {
+            const double proceeds = matched * 1.0;
+            const double cost = p.yes_cost + p.no_cost;
+            risk_manager.register_lih_close(id, ey, en, "Market resolved (hedged)", now);
+            store.push_telemetry(fmt::format("[LIH] SETTLE {} | hedged {:.2f} sh | ~${:.2f} | YES={:.0f} NO={:.0f}",
+                p.asset, matched, proceeds - cost, ey, en));
+        } else {
+            const char* held = p.yes_shares > p.no_shares + 1e-6 ? "YES"
+                             : p.no_shares > p.yes_shares + 1e-6 ? "NO" : "?";
+            risk_manager.register_lih_close(id, ey, en, "Market resolved (unhedged)", now);
+            store.push_telemetry(fmt::format(
+                "[LIH] SETTLE {} | UNHEDGED held {} | yes={:.2f} no={:.2f} | YES={:.0f} NO={:.0f}",
+                p.asset, held, p.yes_shares, p.no_shares, ey, en));
+        }
+        if (is_live && auto_redeem_enabled && !condition_id.empty()) {
+            attempt_onchain_redeem_async(condition_id, id, store, risk_manager);
+        }
+    }
+}
+
 void check_and_close_dh_positions(
     risk::RiskManager& risk_manager,
     StateStore& store,
+    GammaClient& gamma,
     bool auto_redeem_enabled
 ) {
     auto now = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -269,51 +419,18 @@ void check_and_close_dh_positions(
     for (const auto& [id, p] : open_dh) {
         if (now < p.end_date_ts) continue;
 
-        std::string condition_id = p.condition_id;
-        bool is_live = !p.paper_mode;
+        const bool is_live = !p.paper_mode;
+        auto [ey, en] = official_settlement_prices(
+            gamma, store, p.condition_id, p.yes_token_id, p.no_token_id, "DH " + p.asset);
 
-        auto live_y = store.get_token_price(p.yes_token_id);
-        auto live_n = store.get_token_price(p.no_token_id);
+        risk_manager.register_dh_close(id, ey, en, "EXPIRED");
+        store.push_telemetry(fmt::format(
+            "SETTLED {} DH @ YES={:.0f} NO={:.0f} | {}",
+            p.asset, ey, en, p.market_question));
 
-        bool use_structural = false;
-        double ey = 0.0;
-        double en = 0.0;
-
-        if (!live_y || !live_n) {
-            use_structural = true;
-        } else {
-            ey = (live_y->price >= 0.5) ? 1.0 : 0.0;
-            en = (live_n->price >= 0.5) ? 1.0 : 0.0;
-            if (ey + en != 1.0) {
-                use_structural = true;
-            }
-        }
-
-        if (use_structural) {
-            double proceeds = p.combined_cost_usdc + p.locked_profit_usdc;
-            risk_manager.register_dh_close(
-                id,
-                p.yes_entry_price,
-                p.no_entry_price,
-                "Market resolved (structural)",
-                std::nullopt,
-                proceeds);
-            store.push_telemetry(fmt::format(
-                "SETTLED {} DH RESOLVED | PnL ${:+.2f} (locked) | {}",
-                p.asset, p.locked_profit_usdc, p.market_question));
-            spdlog::info(
-                "DH expiry structural settle | {} | proceeds ${:.2f} | locked ${:.2f}",
-                id, proceeds, p.locked_profit_usdc);
-        } else {
-            risk_manager.register_dh_close(id, ey, en, "EXPIRED");
-            store.push_telemetry(fmt::format(
-                "SETTLED {} DH @ YES={:.0f} NO={:.0f} | {}",
-                p.asset, ey, en, p.market_question));
-        }
-
-        if (is_live && auto_redeem_enabled && !condition_id.empty()) {
-            attempt_onchain_redeem_async(condition_id, id, store, risk_manager);
-        } else if (is_live && condition_id.empty()) {
+        if (is_live && auto_redeem_enabled && !p.condition_id.empty()) {
+            attempt_onchain_redeem_async(p.condition_id, id, store, risk_manager);
+        } else if (is_live && p.condition_id.empty()) {
             spdlog::warn("Live DH {} closed without condition_id — cannot auto-redeem", id);
         }
     }
@@ -355,12 +472,15 @@ static bool apply_dh_asset_config(StateStore& store, const std::string& k, const
     return false;
 }
 
+static std::string g_live_state_reload_path;
+
 static void apply_runtime_config(
     const std::string& path,
     risk::RiskManager& risk_manager,
     StateStore& store,
     std::mutex& detector_mutex,
-    std::unique_ptr<DumpHedgeDetector>& dh_detector
+    std::unique_ptr<DumpHedgeDetector>& dh_detector,
+    std::unique_ptr<LegInHedgeDetector>& lih_detector
 ) {
     std::ifstream file(path);
     if (!file.is_open()) return;
@@ -387,12 +507,26 @@ static void apply_runtime_config(
             store.push_telemetry(fmt::format("CONFIG PAUSE | {}", reason));
         } else if (action == "resume") {
             if (risk_manager.resume()) {
-                store.push_telemetry("CONFIG RESUME | trading enabled");
+                if (risk_manager.get_lih_pause_after_round()) {
+                    risk_manager.reset_lih_session();
+                }
+                const std::string msg = risk_manager.get_lih_pause_after_round()
+                    ? "CONFIG RESUME | trading enabled, LIH session reset"
+                    : "CONFIG RESUME | trading enabled";
+                store.push_telemetry(msg);
             }
         } else if (action == "reset_kill") {
             if (risk_manager.reset_kill_switch(true)) {
                 store.push_telemetry("CONFIG RESET_KILL | kill switch cleared");
             }
+        } else if (action == "reload_lih_state") {
+            if (!g_live_state_reload_path.empty() &&
+                persistence::load_live_lih_state(risk_manager, g_live_state_reload_path)) {
+                store.push_telemetry("CONFIG reload_lih_state | live LIH snapshot reloaded");
+            }
+        } else if (action == "reset_lih_session") {
+            risk_manager.reset_lih_session();
+            store.push_telemetry("CONFIG reset_lih_session | leg counter cleared");
         }
     }
 
@@ -450,6 +584,90 @@ static void apply_runtime_config(
                     bool enabled = parse_config_bool(v);
                     store.set_dh_window_enabled(store.dh_enable_5m(), enabled);
                     store.push_telemetry(fmt::format("CONFIG DH_ENABLE_15M={}", enabled ? "true" : "false"));
+                } else if (k == "LIH_MAX_MATCHED_SHARES") {
+                    risk_manager.set_lih_max_matched_shares(std::stod(v));
+                    store.push_telemetry(fmt::format("CONFIG LIH_MAX_MATCHED_SHARES={}", v));
+                } else if (k == "LIH_MAX_USDC_PER_SLOT") {
+                    risk_manager.set_lih_max_usdc_per_slot(std::stod(v));
+                    store.push_telemetry(fmt::format("CONFIG LIH_MAX_USDC_PER_SLOT={}", v));
+                } else if (k == "LIH_MIN_BALANCE_USDC") {
+                    risk_manager.set_lih_min_balance_usdc(std::stod(v));
+                    store.push_telemetry(fmt::format("CONFIG LIH_MIN_BALANCE_USDC={}", v));
+                } else if (k == "LIH_LEG1_MAX_PRICE") {
+                    const double x = std::stod(v);
+                    store.set_lih_config(x, store.lih_target_combined(), store.lih_use_mirror());
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_leg1_max_price(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_LEG1_MAX_PRICE={}", v));
+                } else if (k == "LIH_TARGET_COMBINED") {
+                    const double x = std::stod(v);
+                    store.set_lih_config(store.lih_leg1_max_price(), x, store.lih_use_mirror());
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_target_combined(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_TARGET_COMBINED={}", v));
+                } else if (k == "LIH_USE_MIRROR") {
+                    const bool enabled = parse_config_bool(v);
+                    store.set_lih_config(store.lih_leg1_max_price(), store.lih_target_combined(), enabled);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_use_mirror_prices(enabled);
+                    store.push_telemetry(fmt::format("CONFIG LIH_USE_MIRROR={}", enabled ? "true" : "false"));
+                } else if (k == "LIH_COOLDOWN_SECONDS") {
+                    const double x = std::stod(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_leg1_cooldown_seconds(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_COOLDOWN_SECONDS={} (leg1 alias)", v));
+                } else if (k == "LIH_LEG1_COOLDOWN_SECONDS") {
+                    const double x = std::stod(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_leg1_cooldown_seconds(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_LEG1_COOLDOWN_SECONDS={}", v));
+                } else if (k == "LIH_REBALANCE_COOLDOWN_SECONDS") {
+                    const double x = std::stod(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_rebalance_cooldown_seconds(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_REBALANCE_COOLDOWN_SECONDS={}", v));
+                } else if (k == "LIH_MIN_SECONDS_REMAINING") {
+                    const double x = std::stod(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_min_seconds_remaining(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_MIN_SECONDS_REMAINING={}", v));
+                } else if (k == "LIH_LEG1_MIN_SECONDS_REMAINING") {
+                    const double x = std::stod(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_leg1_min_seconds_remaining(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_LEG1_MIN_SECONDS_REMAINING={}", v));
+                } else if (k == "LIH_LEG1_SHARES") {
+                    const double x = std::stod(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_leg1_shares(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_LEG1_SHARES={}", v));
+                } else if (k == "LIH_ALLOW_OVER_TARGET") {
+                    const bool enabled = parse_config_bool(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_allow_over_target(enabled);
+                    store.push_telemetry(fmt::format("CONFIG LIH_ALLOW_OVER_TARGET={}", enabled ? "true" : "false"));
+                } else if (k == "LIH_FORCE_BALANCE_SECS") {
+                    const double x = std::stod(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_force_balance_secs(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_FORCE_BALANCE_SECS={}", v));
+                } else if (k == "LIH_MAX_REBALANCE_SHARES") {
+                    const double x = std::stod(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_max_rebalance_shares(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_MAX_REBALANCE_SHARES={}", v));
+                } else if (k == "LIH_FLEX_DILUTE_RATIO") {
+                    const double x = std::stod(v);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_flex_dilute_ratio(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_FLEX_DILUTE_RATIO={}", v));
+                } else if (k == "LIH_REBALANCE_MODE") {
+                    std::string mode = v;
+                    std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+                    const bool flex = (mode == "flex" || mode == "b");
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_flex_rebalance(flex);
+                    store.push_telemetry(fmt::format("CONFIG LIH_REBALANCE_MODE={}", flex ? "flex" : "simple"));
                 } else if (apply_dh_asset_config(store, k, v)) {
                 }
             } catch (const std::exception& e) {
@@ -557,11 +775,17 @@ int main() {
 
         bool auto_redeem = !paper_mode && env_flag_true(env, "AUTO_REDEEM", true);
         bool live_dh_dry_run = !paper_mode && env_flag_true(env, "LIVE_DH_DRY_RUN", false);
+        bool live_lih_dry_run = !paper_mode && env_flag_true(env, "LIVE_LIH_DRY_RUN", true);
+        bool use_python_clob = !paper_mode && env_flag_true(env, "USE_PYTHON_CLOB", true);
+        std::string clob_bridge_host = env.count("CLOB_BRIDGE_HOST") ? env["CLOB_BRIDGE_HOST"] : "127.0.0.1";
+        int clob_bridge_port = env.count("CLOB_BRIDGE_PORT") ? std::stoi(env["CLOB_BRIDGE_PORT"]) : 8081;
+        std::string clob_bridge_path = env.count("CLOB_BRIDGE_PATH") ? env["CLOB_BRIDGE_PATH"] : "/internal/clob/order";
 
-        spdlog::info("Starting Core v3.0 (DH-only) | Mode: {} | Bal: ${:.2f} | Auto-redeem: {} | DH dry-run: {}",
+        spdlog::info("Starting Core v3.0 (LIH) | Mode: {} | Bal: ${:.2f} | Auto-redeem: {} | DH dry-run: {} | LIH dry-run: {}",
                      paper_mode ? "PAPER" : "LIVE", starting_balance,
                      auto_redeem ? "on" : "off",
-                     live_dh_dry_run ? "on" : "off");
+                     live_dh_dry_run ? "on" : "off",
+                     live_lih_dry_run ? "on" : "off");
 
         boost::asio::io_context feed_ioc;
         boost::asio::ssl::context feed_ctx{boost::asio::ssl::context::sslv23_client};
@@ -582,7 +806,50 @@ int main() {
         double dh_cooldown = env.count("DH_COOLDOWN_SECONDS") ? std::stod(env["DH_COOLDOWN_SECONDS"]) : 30.0;
         double dh_min_secs = env.count("DH_MIN_SECONDS_REMAINING") ? std::stod(env["DH_MIN_SECONDS_REMAINING"]) : 60.0;
 
-        const std::string strategy = "dump_hedge";
+        bool lih_enabled = env_flag_true(env, "LIH_ENABLED", true);
+        if (!paper_mode && lih_enabled && !live_lih_dry_run) {
+            spdlog::warn("[LIVE LIH] LIVE_LIH_DRY_RUN=false — real CLOB orders WILL be sent");
+        }
+        bool lih_use_mirror = env_flag_true(env, "LIH_USE_MIRROR", true);
+        double lih_leg1_max = env.count("LIH_LEG1_MAX_PRICE") ? std::stod(env["LIH_LEG1_MAX_PRICE"]) : 0.45;
+        double lih_target_combined = env.count("LIH_TARGET_COMBINED") ? std::stod(env["LIH_TARGET_COMBINED"]) : 0.95;
+        double lih_min_secs = env.count("LIH_MIN_SECONDS_REMAINING") ? std::stod(env["LIH_MIN_SECONDS_REMAINING"]) : 15.0;
+        double lih_leg1_min_secs = env.count("LIH_LEG1_MIN_SECONDS_REMAINING")
+            ? std::stod(env["LIH_LEG1_MIN_SECONDS_REMAINING"]) : 30.0;
+        double lih_leg1_cooldown = 20.0;
+        double lih_rebalance_cooldown = 5.0;
+        if (env.count("LIH_LEG1_COOLDOWN_SECONDS")) {
+            lih_leg1_cooldown = std::stod(env["LIH_LEG1_COOLDOWN_SECONDS"]);
+        } else if (env.count("LIH_COOLDOWN_SECONDS")) {
+            lih_leg1_cooldown = std::stod(env["LIH_COOLDOWN_SECONDS"]);
+        }
+        if (env.count("LIH_REBALANCE_COOLDOWN_SECONDS")) {
+            lih_rebalance_cooldown = std::stod(env["LIH_REBALANCE_COOLDOWN_SECONDS"]);
+        }
+        double lih_leg1_shares = env.count("LIH_LEG1_SHARES") ? std::stod(env["LIH_LEG1_SHARES"]) : 10.0;
+        bool lih_allow_over_target = env_flag_true(env, "LIH_ALLOW_OVER_TARGET", true);
+        double lih_force_balance_secs = env.count("LIH_FORCE_BALANCE_SECS")
+            ? std::stod(env["LIH_FORCE_BALANCE_SECS"]) : 45.0;
+        double lih_max_rebalance_shares = env.count("LIH_MAX_REBALANCE_SHARES")
+            ? std::stod(env["LIH_MAX_REBALANCE_SHARES"]) : 0.0;
+        double lih_max_matched_shares = env.count("LIH_MAX_MATCHED_SHARES")
+            ? std::stod(env["LIH_MAX_MATCHED_SHARES"]) : 50.0;
+        double lih_max_usdc_per_slot = env.count("LIH_MAX_USDC_PER_SLOT")
+            ? std::stod(env["LIH_MAX_USDC_PER_SLOT"]) : 0.0;
+        bool lih_one_slot_global = env_flag_true(env, "LIH_ONE_SLOT_GLOBAL", max_concurrent <= 1);
+        int lih_session_max_legs = env.count("LIH_SESSION_MAX_LEGS")
+            ? std::stoi(env["LIH_SESSION_MAX_LEGS"]) : 2;
+        bool lih_pause_after_round = env_flag_true(env, "LIH_PAUSE_AFTER_ROUND", lih_enabled);
+        double lih_min_balance_usdc = env.count("LIH_MIN_BALANCE_USDC")
+            ? std::stod(env["LIH_MIN_BALANCE_USDC"]) : 10.0;
+        std::string lih_rebalance_mode = env.count("LIH_REBALANCE_MODE") ? env["LIH_REBALANCE_MODE"] : "flex";
+        std::transform(lih_rebalance_mode.begin(), lih_rebalance_mode.end(), lih_rebalance_mode.begin(), ::tolower);
+        bool lih_flex_rebalance = (lih_rebalance_mode == "flex" || lih_rebalance_mode == "b");
+        double lih_flex_dilute_ratio = env.count("LIH_FLEX_DILUTE_RATIO")
+            ? std::stod(env["LIH_FLEX_DILUTE_RATIO"]) : 0.95;
+        std::string mirror_path = env.count("LIVE_MIRROR_PATH") ? env["LIVE_MIRROR_PATH"] : "logs/live_mirror.json";
+
+        const std::string strategy = lih_enabled ? "leg_in" : "dump_hedge";
 
         bool binance_feed_enabled = true;
         if (env.count("BINANCE_FEED_ENABLED")) {
@@ -590,9 +857,67 @@ int main() {
             std::transform(bf.begin(), bf.end(), bf.begin(), ::tolower);
             binance_feed_enabled = !(bf == "false" || bf == "0" || bf == "no" || bf == "off");
         }
+        bool book_aware_detect = env_flag_true(env, "DH_BOOK_AWARE_DETECT", true);
+        bool paper_official_book = paper_mode && env_flag_true(env, "PAPER_OFFICIAL_BOOK", true);
+        double paper_slippage_pct = 0.0;
+        if (paper_mode && env.count("PAPER_SLIPPAGE_PCT")) {
+            paper_slippage_pct = std::stod(env["PAPER_SLIPPAGE_PCT"]);
+        }
+        bool paper_depth_sim = paper_mode && env_flag_true(env, "PAPER_DEPTH_SIM", true);
+        bool paper_realism = paper_mode && env_flag_true(env, "PAPER_REALISM_ENABLED", false);
+        const double paper_liq_take = env_double_or(env, "PAPER_LIQUIDITY_TAKE_RATIO", 0.35);
+        const double paper_min_fill = env_double_or(env, "PAPER_MIN_FILL_RATIO", 0.55);
+        const double paper_book_age = env_double_or(env, "PAPER_BOOK_MAX_AGE_SECS", 10.0);
+        const double paper_hedge_fail = env_double_or(env, "PAPER_HEDGE_FAIL_RATE", 0.12);
+        const double paper_leg1_extra_slip = env_double_or(env, "PAPER_LEG1_EXTRA_SLIP_PCT", 0.008);
+        const double paper_hedge_extra_slip = env_double_or(env, "PAPER_HEDGE_EXTRA_SLIP_PCT", 0.012);
+        const double paper_force_extra_slip = env_double_or(env, "PAPER_FORCE_EXTRA_SLIP_PCT", 0.03);
 
-        spdlog::info("Strategy: DH only | DH sum<={:.2f} disc>={:.2f} | Binance chart: {}",
-                     dh_sum_target, dh_min_discount, binance_feed_enabled ? "on" : "off");
+        spdlog::info("Strategy: {} | LIH: {} | max_pos={:.0f}% | Binance chart: {} | Book-aware: {}",
+                     strategy,
+                     lih_enabled ? "on" : "off",
+                     max_pos * 100.0,
+                     binance_feed_enabled ? "on" : "off",
+                     book_aware_detect ? "on" : "off");
+        if (paper_mode) {
+            spdlog::info("Paper pricing | official CLOB book: {} | slippage: {:.2f}% | depth sim: {}",
+                         paper_official_book ? "on" : "off", paper_slippage_pct * 100.0,
+                         paper_depth_sim ? "on" : "off");
+            if (paper_realism) {
+                spdlog::info(
+                    "Paper realism | liq_take={:.0f}% min_fill={:.0f}% book_age={:.0f}s "
+                    "hedge_miss={:.0f}% leg1+{:.2f}% hedge+{:.2f}% force+{:.2f}%",
+                    paper_liq_take * 100.0, paper_min_fill * 100.0, paper_book_age,
+                    paper_hedge_fail * 100.0, paper_leg1_extra_slip * 100.0,
+                    paper_hedge_extra_slip * 100.0, paper_force_extra_slip * 100.0);
+            }
+        }
+        if (lih_enabled) {
+            const std::string max_rebal_str = lih_max_rebalance_shares > 0.0
+                ? fmt::format("{:.0f}", lih_max_rebalance_shares)
+                : "unlimited";
+            const std::string max_matched_str = lih_max_matched_shares > 0.0
+                ? fmt::format("{:.0f}", lih_max_matched_shares)
+                : "unlimited";
+            const std::string slot_cap_str = lih_max_usdc_per_slot > 0.0
+                ? fmt::format("${:.2f}", lih_max_usdc_per_slot)
+                : "balance×pos_frac";
+            spdlog::info(
+                "LIH config | leg1<={:.2f} target<={:.2f} entry={:.1f} mode={} dilute={:.2f} "
+                "leg1_min={:.0f}s hedge_min={:.0f}s force={:.0f}s leg1_cd={} rebal_cd={} "
+                "max_rebal_sh={} max_matched_sh={} slot_cap={} pause_after_round={} session_legs={}",
+                lih_leg1_max, lih_target_combined, lih_leg1_shares,
+                lih_flex_rebalance ? "flex" : "standard",
+                lih_flex_dilute_ratio,
+                lih_leg1_min_secs, lih_min_secs,
+                lih_force_balance_secs,
+                lih_leg1_cooldown <= 0.0 ? "off" : fmt::format("{:.0f}s", lih_leg1_cooldown),
+                lih_rebalance_cooldown <= 0.0 ? "off" : fmt::format("{:.0f}s", lih_rebalance_cooldown),
+                max_rebal_str, max_matched_str, slot_cap_str,
+                lih_pause_after_round ? "yes" : "no", lih_session_max_legs);
+        } else {
+            spdlog::info("DH config | sum<={:.2f} disc>={:.2f}", dh_sum_target, dh_min_discount);
+        }
 
         std::string poly_api_key = env.count("POLY_API_KEY") ? env["POLY_API_KEY"] : "";
         std::string poly_api_secret = env.count("POLY_API_SECRET") ? env["POLY_API_SECRET"] : "";
@@ -612,6 +937,17 @@ int main() {
         }
         risk::RiskManager risk_manager(starting_balance, max_pos, daily_loss, drawdown, max_concurrent, true, 3, 5, 0.02, 300.0, min_order);
         risk_manager.set_fee_rate(fee_rate);
+        risk_manager.set_lih_max_matched_shares(lih_max_matched_shares);
+        risk_manager.set_lih_max_usdc_per_slot(lih_max_usdc_per_slot);
+        risk_manager.set_lih_one_slot_global(lih_one_slot_global);
+        risk_manager.set_lih_session_max_legs(lih_session_max_legs);
+        risk_manager.set_lih_pause_after_round(lih_pause_after_round);
+        risk_manager.set_lih_min_balance_usdc(lih_min_balance_usdc);
+        if (!paper_mode && lih_enabled && lih_min_balance_usdc > 0.0 &&
+            starting_balance + 1e-6 < lih_min_balance_usdc) {
+            spdlog::warn("[LIH] Wallet ${:.2f} below LIH_MIN_BALANCE_USDC=${:.2f} — new leg1 blocked until topped up",
+                         starting_balance, lih_min_balance_usdc);
+        }
 
         bool paper_state_persist = true;
         if (env.count("PAPER_STATE_PERSIST")) {
@@ -620,9 +956,13 @@ int main() {
             paper_state_persist = !(ps == "false" || ps == "0" || ps == "no" || ps == "off");
         }
         std::string paper_state_path = env.count("PAPER_STATE_PATH") ? env["PAPER_STATE_PATH"] : "logs/paper_state.json";
+        std::string live_state_path = env.count("LIVE_STATE_PATH") ? env["LIVE_STATE_PATH"] : "logs/live_state.json";
+        g_live_state_reload_path = live_state_path;
+        bool live_state_persist = env_flag_true(env, "LIVE_STATE_PERSIST", true);
 
         if (paper_mode && paper_state_persist) {
             if (persistence::load_paper_state(risk_manager, paper_state_path)) {
+                risk_manager.reconcile_paper_balance(true);
                 spdlog::info("Paper session resumed | Balance: ${:.2f} | Open: {} | DH trades: {}",
                     risk_manager.get_current_balance(),
                     risk_manager.get_open_position_count(),
@@ -630,6 +970,12 @@ int main() {
                 store.push_telemetry(fmt::format("PAPER STATE RESTORED | ${:.2f}", risk_manager.get_current_balance()));
             } else {
                 spdlog::info("Paper state: fresh session (no snapshot at {})", paper_state_path);
+            }
+        } else if (!paper_mode && lih_enabled && live_state_persist) {
+            if (persistence::load_live_lih_state(risk_manager, live_state_path)) {
+                spdlog::info("Live LIH state loaded from {}", live_state_path);
+            } else {
+                spdlog::info("Live LIH state: fresh session (no snapshot at {})", live_state_path);
             }
         }
         int legacy_la = risk_manager.close_legacy_la_positions();
@@ -652,8 +998,31 @@ int main() {
         store.set_dh_asset_enabled(15, "btc", env_flag_true(env, "DH_ENABLE_15M_BTC", true));
         store.set_dh_asset_enabled(15, "eth", env_flag_true(env, "DH_ENABLE_15M_ETH", true));
         store.set_binance_feed_enabled(binance_feed_enabled);
+        store.set_book_aware_detect(book_aware_detect);
+        store.set_paper_official_book(paper_official_book);
+        store.set_paper_depth_sim(paper_depth_sim);
+        store.set_paper_slippage_pct(paper_slippage_pct);
+        store.set_paper_realism_enabled(paper_realism);
+        store.set_paper_liquidity_take_ratio(paper_liq_take);
+        store.set_paper_min_fill_ratio(paper_min_fill);
+        store.set_paper_book_max_age_secs(paper_book_age);
+        store.set_paper_hedge_fail_rate(paper_hedge_fail);
+        store.set_paper_leg1_extra_slip_pct(paper_leg1_extra_slip);
+        store.set_paper_hedge_extra_slip_pct(paper_hedge_extra_slip);
+        store.set_paper_force_extra_slip_pct(paper_force_extra_slip);
+        store.set_lih_enabled(lih_enabled);
+        store.set_lih_disable_dh(lih_enabled);
+        store.set_lih_config(lih_leg1_max, lih_target_combined, lih_use_mirror);
+        store.set_live_lih_dry_run(live_lih_dry_run);
+        store.set_mirror_path(mirror_path);
+        if (env.count("LIVE_TRADES_BASELINE_TS")) {
+            try {
+                const double baseline = std::stod(env["LIVE_TRADES_BASELINE_TS"]);
+                if (baseline > 0) store.set_trades_baseline_ts(baseline);
+            } catch (...) {}
+        }
 
-        exec::OrderRouter router(feed_ioc, feed_ctx, store, risk_manager, polymarket_host, polymarket_chain_id, verifying_contract, polymarket_pk, polymarket_signer, polymarket_funder, paper_mode, poly_api_key, poly_api_secret, poly_api_passphrase, neg_risk_exchange, live_dh_dry_run);
+        exec::OrderRouter router(feed_ioc, feed_ctx, store, risk_manager, polymarket_host, polymarket_chain_id, verifying_contract, polymarket_pk, polymarket_signer, polymarket_funder, paper_mode, poly_api_key, poly_api_secret, poly_api_passphrase, neg_risk_exchange, live_dh_dry_run, live_lih_dry_run, use_python_clob, clob_bridge_host, clob_bridge_port, clob_bridge_path);
 
         GammaClient gamma(gamma_ioc, gamma_ctx);
         std::shared_ptr<BinanceFeed> btc_feed;
@@ -670,13 +1039,168 @@ int main() {
 
         std::mutex detector_mutex;
         std::unique_ptr<DumpHedgeDetector> dh_detector;
+        std::unique_ptr<LegInHedgeDetector> lih_detector;
+
+        auto execute_lih_action = [&](const LegInAction& act, double now_sec) {
+            if (!paper_mode) {
+                const bool ok = router.submit_lih_action(act, now_sec);
+                if (ok && lih_enabled && live_state_persist) {
+                    persistence::save_live_lih_state(risk_manager, live_state_path);
+                }
+                return;
+            }
+            auto slip_buy = [&](double px) {
+                return apply_paper_slippage(px, true, paper_slippage_pct);
+            };
+            constexpr double kLihMinUsdc = 1.0;
+            switch (act.kind) {
+            case LegInAction::Kind::OpenLeg1: {
+                const std::string& tok = act.buy_yes ? act.market.yes_token_id : act.market.no_token_id;
+                double shares = act.shares;
+                double px = act.price;
+                if (store.paper_depth_sim()) {
+                    const auto wf = store.walk_ask_fill(tok, act.shares);
+                    if (wf.shares <= 0.0 || wf.cost_usdc + 1e-6 < kLihMinUsdc) {
+                        if (store.paper_realism_enabled()) {
+                            spdlog::info("[PAPER REALISM] LEG1 miss {} | depth/partial fill",
+                                         act.market.asset);
+                            store.push_telemetry(fmt::format(
+                                "[PAPER REALISM] LEG1 miss {} | depth/partial", act.market.asset));
+                        }
+                        return;
+                    }
+                    shares = wf.shares;
+                    px = wf.avg_price;
+                    px = apply_paper_slippage(px, true, paper_action_extra_slip(store, act));
+                    spdlog::info("[LIH DEPTH] LEG1 {} {:.2f}/{:.2f}sh avg {:.4f} ({} lvls)",
+                                 act.market.asset, shares, act.shares, px, wf.levels_used);
+                } else {
+                    px = slip_buy(apply_paper_slippage(px, true, paper_action_extra_slip(store, act)));
+                }
+                const double cost = shares * px;
+                if (!risk_manager.can_open_lih_leg(
+                        cost, false, nullptr, 0.0, &act.market.asset, act.market.window_minutes).first) {
+                    return;
+                }
+                if (!risk_manager.try_begin_lih_leg1(act.market.asset, act.market.window_minutes)) {
+                    return;
+                }
+                risk_manager.register_lih_open_leg1(act.market, act.buy_yes, px, shares, now_sec);
+                store.push_signal(fmt::format("LIH LEG1 {} {} {:.2f}sh @ {:.4f} ({})",
+                    act.market.asset, act.buy_yes ? "YES" : "NO", shares, px, act.note));
+                break;
+            }
+            case LegInAction::Kind::CompleteHedge:
+            case LegInAction::Kind::HeavyDilute: {
+                const std::string& tok = act.buy_yes ? act.market.yes_token_id : act.market.no_token_id;
+                if (act.kind == LegInAction::Kind::CompleteHedge
+                    && store.paper_realism_enabled()
+                    && act.note.find("force") == std::string::npos
+                    && paper_hedge_liquidity_miss(tok, now_sec, store.paper_hedge_fail_rate())) {
+                    spdlog::info("[PAPER REALISM] hedge miss {} | {}", act.market.asset, act.note);
+                    store.push_telemetry(fmt::format(
+                        "[PAPER REALISM] hedge miss {} | {}", act.market.asset, act.note));
+                    return;
+                }
+                double shares = act.shares;
+                double px = act.price;
+                if (store.paper_depth_sim()) {
+                    const auto wf = store.walk_ask_fill(tok, act.shares);
+                    if (wf.shares <= 0.0 || wf.cost_usdc + 1e-6 < kLihMinUsdc) {
+                        if (store.paper_realism_enabled()) {
+                            spdlog::info("[PAPER REALISM] {} miss {} | partial {:.2f}/{:.2f}sh",
+                                         act.kind == LegInAction::Kind::HeavyDilute ? "DILUTE" : "HEDGE",
+                                         act.market.asset, wf.shares, act.shares);
+                            store.push_telemetry(fmt::format(
+                                "[PAPER REALISM] {} miss {} | partial {:.2f}/{:.2f}sh",
+                                act.kind == LegInAction::Kind::HeavyDilute ? "DILUTE" : "HEDGE",
+                                act.market.asset, wf.shares, act.shares));
+                        }
+                        return;
+                    }
+                    shares = wf.shares;
+                    px = wf.avg_price;
+                    px = apply_paper_slippage(px, true, paper_action_extra_slip(store, act));
+                    spdlog::info("[LIH DEPTH] {} {} {:.2f}/{:.2f}sh avg {:.4f} ({} lvls)",
+                                 act.kind == LegInAction::Kind::HeavyDilute ? "HEAVY-DILUTE" : "HEDGE",
+                                 act.market.asset, shares, act.shares, px, wf.levels_used);
+                } else {
+                    px = slip_buy(apply_paper_slippage(px, true, paper_action_extra_slip(store, act)));
+                }
+                const double cost = shares * px;
+                if (!risk_manager.can_open_lih_leg(cost, true, &act.lih_id, shares).first) return;
+                if (!risk_manager.try_begin_lih_rebalance(act.lih_id)) return;
+                risk_manager.register_lih_add_leg(act.lih_id, act.buy_yes, px, shares);
+                const char* tag = act.kind == LegInAction::Kind::HeavyDilute ? "HEAVY-DILUTE" : "HEDGE";
+                store.push_signal(fmt::format("LIH {} {} {} {:.2f}sh @ {:.4f} ({})",
+                    tag, act.market.asset, act.buy_yes ? "YES" : "NO", shares, px, act.note));
+                break;
+            }
+            case LegInAction::Kind::ScalePaired:
+            case LegInAction::Kind::DilutePaired: {
+                double shares = act.shares;
+                double yes_p = 0.0;
+                double no_p = 0.0;
+                if (store.paper_depth_sim()) {
+                    const auto pf = store.walk_paired_fill(
+                        act.market.yes_token_id, act.market.no_token_id,
+                        act.shares, risk_manager.get_max_leg_cost_usdc());
+                    if (pf.shares <= 0.0 || pf.cost_usdc + 1e-6 < kLihMinUsdc) return;
+                    shares = pf.shares;
+                    const auto yes_w = store.walk_ask_fill(act.market.yes_token_id, shares);
+                    const auto no_w = store.walk_ask_fill(act.market.no_token_id, shares);
+                    yes_p = yes_w.avg_price;
+                    no_p = no_w.avg_price;
+                    if (!risk_manager.can_open_lih_leg(
+                            yes_w.cost_usdc + no_w.cost_usdc, true, &act.lih_id, shares).first) return;
+                    spdlog::info("[LIH DEPTH] {} {} {:.2f}/{:.2f} paired avg {:.4f}+{:.4f}={:.4f} ({} lvls)",
+                                 act.kind == LegInAction::Kind::DilutePaired ? "DILUTE" : "SCALE",
+                                 act.market.asset, shares, act.shares, yes_p, no_p, yes_p + no_p,
+                                 yes_w.levels_used + no_w.levels_used);
+                } else {
+                    if (auto y = store.get_official_buy_ask(act.market.yes_token_id)) yes_p = *y;
+                    if (auto n = store.get_official_buy_ask(act.market.no_token_id)) no_p = *n;
+                    if (yes_p <= 0 || no_p <= 0) {
+                        auto yes = store.get_token_price(act.market.yes_token_id);
+                        auto no = store.get_token_price(act.market.no_token_id);
+                        if (yes) yes_p = yes->price;
+                        if (no) no_p = no->price;
+                    }
+                    yes_p = slip_buy(yes_p);
+                    no_p = slip_buy(no_p);
+                    if (!risk_manager.can_open_lih_leg(
+                            shares * (yes_p + no_p), true, &act.lih_id, shares).first) return;
+                }
+                if (!risk_manager.try_begin_lih_rebalance(act.lih_id)) return;
+                risk_manager.register_lih_add_paired(act.lih_id, yes_p, no_p, shares);
+                const char* tag = act.kind == LegInAction::Kind::DilutePaired ? "DILUTE" : "SCALE";
+                store.push_signal(fmt::format("LIH {} {} +{:.2f} paired ({})",
+                    tag, act.market.asset, shares, act.note));
+                break;
+            }
+            }
+        };
+
+        auto try_lih_evaluate = [&]() {
+            if (!lih_enabled || !lih_detector) return;
+            std::lock_guard<std::mutex> lock(detector_mutex);
+            const double now_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            const double now_sec = now_ms / 1000.0;
+            if (auto act = lih_detector->evaluate(now_ms, risk_manager)) {
+                execute_lih_action(*act, now_sec);
+            }
+        };
 
         auto poly_feed = std::make_shared<PolymarketFeed>(feed_ioc, feed_ctx, store);
 
         poly_feed->set_tick_callback([&](const std::string& /*token_id*/) {
-            std::lock_guard<std::mutex> lock(detector_mutex);
-            double now_ms = std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count();
+            try_lih_evaluate();
+
+            if (lih_enabled) return;
             if (!dh_detector) return;
+            const double now_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
             auto signal = dh_detector->evaluate(now_ms);
             if (!signal) return;
 
@@ -692,7 +1216,16 @@ int main() {
                 signal->asset, signal->yes_price, signal->no_price,
                 signal->combined_price, signal->discount * 100.0));
 
-            if (!router.submit_dump_hedge_order(*signal, size_shares)) return;
+            DumpHedgeSignal fill_signal = *signal;
+            if (paper_mode && paper_slippage_pct > 0.0) {
+                fill_signal.yes_price = apply_paper_slippage(fill_signal.yes_price, true, paper_slippage_pct);
+                fill_signal.no_price = apply_paper_slippage(fill_signal.no_price, true, paper_slippage_pct);
+                fill_signal.combined_price = fill_signal.yes_price + fill_signal.no_price;
+                fill_signal.discount = 1.0 - fill_signal.combined_price - store.compute_dh_entry_fee_per_share(
+                    fill_signal.yes_price, fill_signal.no_price,
+                    fill_signal.yes_token_id, fill_signal.no_token_id);
+            }
+            if (!router.submit_dump_hedge_order(fill_signal, size_shares)) return;
         });
 
         // Start feeds only after all callbacks are ready
@@ -704,6 +1237,7 @@ int main() {
         poly_feed->start();
 
         std::atomic<bool> is_refreshing{false};
+        std::vector<std::string> rest_poll_tokens;
         auto refresh_markets = [&]() {
             if (is_refreshing.exchange(true)) return;
             try {
@@ -729,12 +1263,29 @@ int main() {
                 }
                 {
                     std::lock_guard<std::mutex> lock(detector_mutex);
-                    dh_detector = std::make_unique<DumpHedgeDetector>(store, all_m, dh_sum_target, dh_min_discount, dh_min_secs, dh_cooldown);
-                    dh_detector->set_fee_rate(fee_rate);
+                    if (!lih_enabled) {
+                        dh_detector = std::make_unique<DumpHedgeDetector>(
+                            store, all_m, dh_sum_target, dh_min_discount, dh_min_secs, dh_cooldown);
+                        dh_detector->set_fee_rate(fee_rate);
+                    }
+                    if (lih_enabled) {
+                        lih_detector = std::make_unique<LegInHedgeDetector>(
+                            store, all_m, lih_leg1_max, lih_target_combined, lih_min_secs,
+                            lih_leg1_min_secs,
+                            lih_leg1_cooldown, lih_rebalance_cooldown,
+                            lih_use_mirror, lih_leg1_shares, lih_allow_over_target,
+                            lih_force_balance_secs, lih_max_rebalance_shares,
+                            lih_flex_rebalance, lih_flex_dilute_ratio);
+                    }
+                    risk_manager.sync_lih_from_markets(all_m);
                 }
                 std::vector<std::string> tokens;
                 for (const auto& m : all_m) { tokens.push_back(m.yes_token_id); tokens.push_back(m.no_token_id); }
                 if (!tokens.empty()) poly_feed->subscribe(tokens);
+                {
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    rest_poll_tokens = tokens;
+                }
                 store.push_telemetry(fmt::format("MARKETS REFRESHED | {} markets | {} tokens | fee_curve {}",
                     all_m.size(), tokens.size(), fee_markets));
             } catch (const std::exception& e) {
@@ -798,9 +1349,30 @@ int main() {
         auto last_binance_rest = std::chrono::system_clock::now() - std::chrono::seconds(10);
         bool rest_fallback_logged = false;
         auto last_paper_save = std::chrono::system_clock::now();
+        auto last_live_save = std::chrono::system_clock::now();
+        auto last_rest_book_poll = std::chrono::system_clock::now() - std::chrono::seconds(5);
+        std::atomic<bool> rest_book_refreshing{false};
 
         while (true) {
             auto loop_start = std::chrono::system_clock::now();
+            const bool poll_rest_book = book_aware_detect || paper_official_book;
+            if (poll_rest_book &&
+                !rest_book_refreshing.load(std::memory_order_acquire) &&
+                loop_start - last_rest_book_poll > std::chrono::milliseconds(2500)) {
+                last_rest_book_poll = loop_start;
+                std::vector<std::string> tokens_copy;
+                {
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    tokens_copy = rest_poll_tokens;
+                }
+                if (!tokens_copy.empty()) {
+                    rest_book_refreshing.store(true, std::memory_order_release);
+                    boost::asio::post(feed_ioc, [&, tokens_copy]() {
+                        router.refresh_rest_book(tokens_copy);
+                        rest_book_refreshing.store(false, std::memory_order_release);
+                    });
+                }
+            }
             if (loop_start - last_market_refresh > std::chrono::seconds(60)) {
                 last_market_refresh = loop_start;
                 std::thread([&refresh_markets]() { refresh_markets(); }).detach();
@@ -818,11 +1390,25 @@ int main() {
                 }
             }
             risk_manager.is_trading_allowed(); // Trigger resume checks even if no signals fire
-            apply_runtime_config("logs/runtime_config.json", risk_manager, store, detector_mutex, dh_detector);
-            check_and_close_dh_positions(risk_manager, store, auto_redeem);
+            apply_runtime_config("logs/runtime_config.json", risk_manager, store, detector_mutex, dh_detector, lih_detector);
+            check_and_close_dh_positions(risk_manager, store, gamma, auto_redeem);
+            if (lih_enabled) {
+                if (paper_mode) store.reload_live_mirror();
+                const double now_sec_loop = std::chrono::duration<double>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                if (!paper_mode) {
+                    risk_manager.purge_expired_lih_open(now_sec_loop, 30.0);
+                }
+                check_and_close_lih_positions(risk_manager, store, gamma, auto_redeem);
+                try_lih_evaluate();
+            }
             if (paper_mode && paper_state_persist && loop_start - last_paper_save > std::chrono::seconds(10)) {
                 last_paper_save = loop_start;
                 persistence::save_paper_state(risk_manager, paper_state_path);
+            }
+            if (!paper_mode && lih_enabled && live_state_persist && loop_start - last_live_save > std::chrono::seconds(10)) {
+                last_live_save = loop_start;
+                persistence::save_live_lih_state(risk_manager, live_state_path);
             }
             std::cout << store.get_dashboard_json() << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(250));

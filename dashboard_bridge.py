@@ -5,6 +5,7 @@ import websockets
 import threading
 import sys
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,12 +16,26 @@ from bot_config import (
     append_audit,
     read_audit,
     write_runtime_config,
+    _sanitize_audit_label,
+    _sanitize_audit_reason,
 )
+
+try:
+    from clob_live import post_fak_order
+except ImportError:
+    post_fak_order = None
+
+try:
+    from clob_trades import fetch_user_trades
+except ImportError:
+    fetch_user_trades = None
 
 # Configuration
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
 WS_PORT = int(os.getenv("WS_PORT", "8080"))
+HTTP_BIND = os.getenv("HTTP_BIND", "127.0.0.1")
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8081"))
+BOT_API_TOKEN = os.getenv("BOT_API_TOKEN", "").strip()
 PREFLIGHT_PATH = Path(os.getenv("PREFLIGHT_PATH", "logs/preflight.json"))
 CORE_CMD = ["./build/trading-core.exe"] if os.name == "nt" else ["./build/trading-core"]
 
@@ -43,11 +58,20 @@ def _print_startup_banner() -> None:
             file=sys.stderr,
         )
     if cfg:
-        print(
-            f"   DH sum≤{cfg.get('DH_SUM_TARGET', '?')}  "
-            f"5m={cfg.get('DH_ENABLE_5M', '?')}  15m={cfg.get('DH_ENABLE_15M', '?')}",
-            file=sys.stderr,
-        )
+        lih = cfg.get("LIH_ENABLED", "true").lower() not in ("false", "0", "no", "off")
+        if lih:
+            print(
+                f"   LIH leg1≤{cfg.get('LIH_LEG1_MAX_PRICE', '?')}  "
+                f"target={cfg.get('LIH_TARGET_COMBINED', '?')}  "
+                f"5m={cfg.get('DH_ENABLE_5M', '?')}  15m={cfg.get('DH_ENABLE_15M', '?')}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"   DH sum≤{cfg.get('DH_SUM_TARGET', '?')}  "
+                f"5m={cfg.get('DH_ENABLE_5M', '?')}  15m={cfg.get('DH_ENABLE_15M', '?')}",
+                file=sys.stderr,
+            )
     print("", file=sys.stderr)
 
 
@@ -75,14 +99,18 @@ def _maybe_print_core_ready(line: str) -> None:
         if d.get(k, True) and d.get("dhEnable15m", True)
     ]
     fee = "动态" if d.get("useDynamicFees") else "扁平"
+    strat = "LIH" if d.get("lihEnabled") else "DH"
+    lih_trades = d.get("totalLihTrades", 0)
+    dh_trades = d.get("totalDhTrades", 0)
     print(
-        f"[CORE 就绪] {'纸面' if paper else '实盘'} | 余额 ${bal:.2f} | 持仓 {open_n} | 状态 {status}",
+        f"[CORE 就绪] {'纸面' if paper else '实盘'} | {strat} | 余额 ${bal:.2f} | 持仓 {open_n} | 状态 {status}",
         file=sys.stderr,
     )
     print(
         f"            5m[{' '.join(assets_5m) or '关'}]  "
         f"15m[{' '.join(assets_15m) or '关'}]  "
-        f"费率={fee}  市场={d.get('marketsScanned', 0)}",
+        f"费率={fee}  市场={d.get('marketsScanned', 0)}  "
+        f"成交 LIH={lih_trades} DH={dh_trades}",
         file=sys.stderr,
     )
 
@@ -120,6 +148,16 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) 
     handler.wfile.write(body)
 
 
+def _check_api_auth(handler: BaseHTTPRequestHandler) -> bool:
+    if not BOT_API_TOKEN:
+        return True
+    auth = handler.headers.get("Authorization", "")
+    token = handler.headers.get("X-Bot-Api-Token", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+    return token == BOT_API_TOKEN
+
+
 def _read_body(handler: BaseHTTPRequestHandler) -> dict:
     length = int(handler.headers.get("Content-Length", "0") or "0")
     if length <= 0:
@@ -129,6 +167,14 @@ def _read_body(handler: BaseHTTPRequestHandler) -> dict:
         return json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON: {exc}") from exc
+
+
+def _is_localhost(handler: BaseHTTPRequestHandler) -> bool:
+    host = handler.headers.get("Host", "")
+    if host.startswith("127.0.0.1") or host.startswith("localhost"):
+        return True
+    peer = handler.client_address[0] if handler.client_address else ""
+    return peer in ("127.0.0.1", "::1", "localhost")
 
 
 class ConfigHTTPHandler(BaseHTTPRequestHandler):
@@ -152,6 +198,24 @@ class ConfigHTTPHandler(BaseHTTPRequestHandler):
                     _json_response(self, 404, {"error": "preflight not run yet"})
                 else:
                     _json_response(self, 200, {"preflight": report})
+            elif path == "/api/clob/trades":
+                if fetch_user_trades is None:
+                    _json_response(self, 503, {"error": "clob_trades unavailable"})
+                    return
+                query = urlparse(self.path).query
+                limit = 200
+                if query:
+                    for part in query.split("&"):
+                        if part.startswith("limit="):
+                            try:
+                                limit = int(part.split("=", 1)[1])
+                            except ValueError:
+                                pass
+                trades = fetch_user_trades(limit=limit)
+                if trades and isinstance(trades[0], dict) and trades[0].get("error"):
+                    _json_response(self, 502, {"error": trades[0]["error"], "trades": []})
+                else:
+                    _json_response(self, 200, {"trades": trades, "count": len(trades)})
             else:
                 _json_response(self, 404, {"error": "not found"})
         except Exception as exc:
@@ -160,8 +224,36 @@ class ConfigHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
+            if path == "/internal/clob/order":
+                if not _is_localhost(self):
+                    _json_response(self, 403, {"error": "localhost only"})
+                    return
+                if post_fak_order is None:
+                    _json_response(self, 503, {"error": "clob_live unavailable"})
+                    return
+                body = _read_body(self)
+                token_id = str(body.get("token_id") or "").strip()
+                side = str(body.get("side") or "BUY").strip()
+                try:
+                    price = float(body.get("price"))
+                    size_shares = float(body.get("size_shares"))
+                except (TypeError, ValueError):
+                    _json_response(self, 400, {"error": "price and size_shares required"})
+                    return
+                if not token_id or price <= 0 or size_shares <= 0:
+                    _json_response(self, 400, {"error": "invalid token_id/price/size_shares"})
+                    return
+                neg_risk = bool(body.get("neg_risk", False))
+                result = post_fak_order(token_id, price, size_shares, side, neg_risk=neg_risk)
+                status = 200 if result.get("success") else 400
+                _json_response(self, status, result)
+                return
+
+            if not _check_api_auth(self):
+                _json_response(self, 401, {"error": "unauthorized"})
+                return
             body = _read_body(self)
-            user = str(body.get("user") or "web")
+            user = _sanitize_audit_label(str(body.get("user") or "web"))
 
             if path == "/api/config":
                 patch = body.get("patch") or {}
@@ -178,10 +270,25 @@ class ConfigHTTPHandler(BaseHTTPRequestHandler):
                 if action not in ("pause", "resume", "reset_kill"):
                     _json_response(self, 400, {"error": "action must be pause|resume|reset_kill"})
                     return
-                reason = str(body.get("reason") or f"Manual {action} via web")
+                reason = _sanitize_audit_reason(str(body.get("reason") or f"Manual {action} via web")) or f"Manual {action} via web"
                 append_audit({"type": "control", "user": user, "action": action, "reason": reason})
                 write_runtime_config({"control": action, "reason": reason, "user": user})
                 _json_response(self, 200, {"ok": True, "action": action})
+
+            elif path == "/api/mirror":
+                mirror_path = Path(os.getenv("LIVE_MIRROR_PATH", "logs/live_mirror.json"))
+                mirror_path.parent.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    "updated_at": body.get("updated_at") or time.time(),
+                    "source": body.get("source") or "external",
+                    "assets": body.get("assets") or {},
+                }
+                if not isinstance(payload["assets"], dict):
+                    _json_response(self, 400, {"error": "assets must be object"})
+                    return
+                mirror_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                append_audit({"type": "mirror", "user": user, "assets": list(payload["assets"].keys())})
+                _json_response(self, 200, {"ok": True, "path": str(mirror_path), "assets": len(payload["assets"])})
 
             else:
                 _json_response(self, 404, {"error": "not found"})
@@ -192,8 +299,8 @@ class ConfigHTTPHandler(BaseHTTPRequestHandler):
 
 
 def run_http_server():
-    server = ThreadingHTTPServer((WS_HOST, HTTP_PORT), ConfigHTTPHandler)
-    print(f"Config API on http://{WS_HOST}:{HTTP_PORT}", file=sys.stderr)
+    server = ThreadingHTTPServer((HTTP_BIND, HTTP_PORT), ConfigHTTPHandler)
+    print(f"Config API on http://{HTTP_BIND}:{HTTP_PORT}", file=sys.stderr)
     server.serve_forever()
 
 
@@ -211,6 +318,29 @@ async def handler(websocket):
             pass
     finally:
         clients.remove(websocket)
+
+
+def _live_maintenance_loop() -> None:
+    """Prune expired LIH rows from disk and ask core to reload (live only)."""
+    while True:
+        time.sleep(60)
+        if os.getenv("PAPER_MODE", "true").lower() in ("false", "0", "no", "off"):
+            try:
+                subprocess.run(
+                    [sys.executable, "scripts/prune_live_lih.py"],
+                    cwd=os.getcwd(),
+                    timeout=30,
+                    check=False,
+                )
+                subprocess.run(
+                    [sys.executable, "scripts/live_lih_reconcile.py"],
+                    cwd=os.getcwd(),
+                    timeout=45,
+                    check=False,
+                )
+                write_runtime_config({"control": "reload_lih_state", "user": "maintenance"})
+            except Exception as exc:
+                print(f"[MAINT] prune failed: {exc}", file=sys.stderr)
 
 
 def run_core():
@@ -247,6 +377,7 @@ async def main():
     _run_preflight()
     _print_startup_banner()
     threading.Thread(target=run_http_server, daemon=True).start()
+    threading.Thread(target=_live_maintenance_loop, daemon=True).start()
 
     async with websockets.serve(handler, WS_HOST, WS_PORT):
         print(f"Bridge started on ws://{WS_HOST}:{WS_PORT}", file=sys.stderr)

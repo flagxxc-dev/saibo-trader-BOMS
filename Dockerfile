@@ -26,7 +26,11 @@ RUN conan profile detect --force \
  && conan install . --output-folder=build --build=missing -s compiler.cppstd=20
 
 COPY trading-core/src ./src
-RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
+# BuildKit may inject host proxy (127.0.0.1) — clear for git FetchContent (secp256k1).
+RUN export HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= ALL_PROXY= all_proxy= NO_PROXY='*' \
+ && git config --global http.proxy "" \
+ && git config --global https.proxy "" \
+ && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
  && cmake --build build --target trading-core -j$(nproc)
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
@@ -48,6 +52,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY dashboard_bridge.py bot_config.py derive_and_update_keys.py derive_keys.py fetch_balance.py redeem_positions.py cli_dashboard.py test_auth.py live_preflight.py polymarket_fees.py start_bot.py status_bot.py ./
+COPY scripts/mirror_server_live.py ./scripts/mirror_server_live.py
 COPY --from=cpp-builder /src/trading-core/build/trading-core ./build/trading-core
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh \

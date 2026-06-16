@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth";
+import { validateAuditReason, validateAuditUser } from "@/lib/inputSecurity";
 import { fetchBotConfig, updateBotConfig, botControl, fetchAuditEvents } from "@/lib/botApi";
 
 export const dynamic = "force-dynamic";
@@ -20,9 +21,10 @@ export async function POST(req: Request) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const body = await req.json();
-    const user = session.user?.email || "web";
+    const user = validateAuditUser(session.user?.email || "web");
     if (body.action) {
-      const result = await botControl(body.action, user, body.reason);
+      const reason = body.reason ? validateAuditReason(String(body.reason)) : undefined;
+      const result = await botControl(body.action, user, reason || undefined);
       return NextResponse.json(result);
     }
     if (body.patch) {

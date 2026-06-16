@@ -78,8 +78,69 @@ public:
 
     void update_token_price(std::string_view token_id, const TokenPrice& price);
     void update_token_bid(std::string_view token_id, const TokenPrice& price);
+    void update_ws_book_ask(std::string_view token_id, const TokenPrice& price);
+    void update_rest_book_ask(std::string_view token_id, double price, double depth_shares = 0.0);
+    void update_rest_book_bid(std::string_view token_id, double price);
     std::optional<TokenPrice> get_token_bid(std::string_view token_id) const;
     std::optional<TokenPrice> get_token_price(std::string_view token_id) const;
+    // Official CLOB mark (best bid) and buy (best ask) — REST preferred, WS fallback.
+    std::optional<double> get_official_mark_bid(
+        std::string_view token_id, double rest_max_age_sec = 20.0) const;
+    std::optional<double> get_official_buy_ask(
+        std::string_view token_id, double rest_max_age_sec = 20.0) const;
+
+    struct DetectionAsk {
+        double conservative_ask = 0.0;
+        double ws_book_ask = 0.0;
+        double rest_book_ask = 0.0;
+        double rest_depth_shares = 0.0;
+        bool ws_ok = false;
+        bool rest_ok = false;
+    };
+    void set_book_aware_detect(bool v) { book_aware_detect_ = v; }
+    bool book_aware_detect() const { return book_aware_detect_; }
+    void set_paper_official_book(bool v) { paper_official_book_ = v; }
+    bool paper_official_book() const { return paper_official_book_; }
+    void set_paper_depth_sim(bool v) { paper_depth_sim_ = v; }
+    bool paper_depth_sim() const { return paper_depth_sim_; }
+    void set_paper_slippage_pct(double v) { paper_slippage_pct_ = v; }
+    double paper_slippage_pct() const { return paper_slippage_pct_; }
+    void set_paper_realism_enabled(bool v) { paper_realism_enabled_ = v; }
+    bool paper_realism_enabled() const { return paper_realism_enabled_; }
+    void set_paper_liquidity_take_ratio(double v) { paper_liquidity_take_ratio_ = v; }
+    double paper_liquidity_take_ratio() const { return paper_liquidity_take_ratio_; }
+    void set_paper_min_fill_ratio(double v) { paper_min_fill_ratio_ = v; }
+    double paper_min_fill_ratio() const { return paper_min_fill_ratio_; }
+    void set_paper_book_max_age_secs(double v) { paper_book_max_age_secs_ = v; }
+    double paper_book_max_age_secs() const { return paper_book_max_age_secs_; }
+    void set_paper_hedge_fail_rate(double v) { paper_hedge_fail_rate_ = v; }
+    double paper_hedge_fail_rate() const { return paper_hedge_fail_rate_; }
+    void set_paper_leg1_extra_slip_pct(double v) { paper_leg1_extra_slip_pct_ = v; }
+    double paper_leg1_extra_slip_pct() const { return paper_leg1_extra_slip_pct_; }
+    void set_paper_hedge_extra_slip_pct(double v) { paper_hedge_extra_slip_pct_ = v; }
+    double paper_hedge_extra_slip_pct() const { return paper_hedge_extra_slip_pct_; }
+    void set_paper_force_extra_slip_pct(double v) { paper_force_extra_slip_pct_ = v; }
+    double paper_force_extra_slip_pct() const { return paper_force_extra_slip_pct_; }
+
+    struct BookLevel {
+        double price = 0.0;
+        double size = 0.0;
+    };
+    struct WalkFillResult {
+        double shares = 0.0;
+        double avg_price = 0.0;
+        double cost_usdc = 0.0;
+        int levels_used = 0;
+    };
+    void update_rest_ask_ladder(std::string_view token_id, std::vector<BookLevel> levels);
+    WalkFillResult walk_ask_fill(
+        std::string_view token_id, double max_shares, double rest_max_age_sec = 20.0) const;
+    WalkFillResult walk_paired_fill(
+        std::string_view yes_token, std::string_view no_token,
+        double max_shares, double balance_usdc, double balance_reserve = 0.995,
+        double rest_max_age_sec = 20.0) const;
+    std::optional<DetectionAsk> get_detection_ask(
+        std::string_view token_id, double rest_max_age_sec = 20.0) const;
 
     void update_markets(const std::vector<MarketInfo>& markets);
     std::string get_dashboard_json() const;
@@ -90,11 +151,40 @@ public:
     void push_telemetry(const std::string& line);
     void push_signal(const std::string& line);
 
+    struct MirrorAssetQuote {
+        double book_yes = 0.0;
+        double book_no = 0.0;
+        double ws_yes = 0.0;
+        double ws_no = 0.0;
+        double updated_at = 0.0;
+        bool fresh = false;
+    };
+
+    void set_lih_enabled(bool v) { lih_enabled_ = v; }
+    bool lih_enabled() const { return lih_enabled_; }
+    void set_lih_disable_dh(bool v) { lih_disable_dh_ = v; }
+    bool lih_disable_dh() const { return lih_disable_dh_; }
+    bool lih_use_mirror() const { return lih_use_mirror_; }
+    void set_lih_config(double leg1_max, double target_combined, bool use_mirror) {
+        lih_leg1_max_price_ = leg1_max;
+        lih_target_combined_ = target_combined;
+        lih_use_mirror_ = use_mirror;
+    }
+    double lih_leg1_max_price() const { return lih_leg1_max_price_; }
+    double lih_target_combined() const { return lih_target_combined_; }
+    void set_live_lih_dry_run(bool v) { live_lih_dry_run_ = v; }
+    bool live_lih_dry_run() const { return live_lih_dry_run_; }
+    void set_trades_baseline_ts(double ts) { trades_baseline_ts_ = ts; }
+    double trades_baseline_ts() const { return trades_baseline_ts_; }
+    void set_mirror_path(std::string path) { mirror_path_ = std::move(path); }
+    void reload_live_mirror(double max_age_sec = 45.0);
+    std::optional<MirrorAssetQuote> get_mirror_quote(const std::string& asset) const;
+
 private:
     risk::RiskManager* risk_manager_ = nullptr;
     bool paper_mode_ = true;
     double fee_rate_ = 0.018;
-    std::string strategy_ = "dump_hedge";
+    std::string strategy_ = "leg_in";
     double dh_sum_target_ = 0.95;
     double dh_min_discount_ = 0.02;
     double dh_cooldown_seconds_ = 30.0;
@@ -107,6 +197,30 @@ private:
     bool dh_15m_btc_ = true;
     bool dh_15m_eth_ = true;
     bool binance_feed_enabled_ = true;
+    bool book_aware_detect_ = true;
+    bool paper_official_book_ = true;
+    bool paper_depth_sim_ = false;
+    double paper_slippage_pct_ = 0.0;
+    bool paper_realism_enabled_ = false;
+    double paper_liquidity_take_ratio_ = 1.0;
+    double paper_min_fill_ratio_ = 0.0;
+    double paper_book_max_age_secs_ = 20.0;
+    double paper_hedge_fail_rate_ = 0.0;
+    double paper_leg1_extra_slip_pct_ = 0.0;
+    double paper_hedge_extra_slip_pct_ = 0.0;
+    double paper_force_extra_slip_pct_ = 0.0;
+    bool lih_enabled_ = true;
+    bool lih_disable_dh_ = false;
+    double lih_leg1_max_price_ = 0.45;
+    double lih_target_combined_ = 0.95;
+    bool lih_use_mirror_ = true;
+    bool live_lih_dry_run_ = true;
+    double trades_baseline_ts_ = 0.0;
+    std::string mirror_path_ = "logs/live_mirror.json";
+    mutable std::shared_mutex mirror_mutex_;
+    std::unordered_map<std::string, MirrorAssetQuote> mirror_by_asset_;
+    double mirror_loaded_at_ = 0.0;
+
     mutable std::shared_mutex btc_mutex_;
     PriceTick latest_btc_tick_{};
     std::deque<PriceTick> btc_history_;
@@ -125,6 +239,11 @@ private:
     mutable std::shared_mutex token_mutex_;
     std::unordered_map<std::string, TokenPrice> token_prices_;
     std::unordered_map<std::string, TokenPrice> token_bids_;
+    std::unordered_map<std::string, TokenPrice> ws_book_asks_;
+    std::unordered_map<std::string, TokenPrice> rest_book_asks_;
+    std::unordered_map<std::string, TokenPrice> rest_book_bids_;
+    std::unordered_map<std::string, double> rest_book_depth_;
+    std::unordered_map<std::string, std::vector<BookLevel>> rest_ask_ladders_;
     std::unordered_map<std::string, TokenFeeParams> token_fee_params_;
 
     mutable std::shared_mutex market_mutex_;

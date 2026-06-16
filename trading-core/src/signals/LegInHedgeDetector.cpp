@@ -1,0 +1,450 @@
+#include "LegInHedgeDetector.h"
+#include <spdlog/spdlog.h>
+#include <fmt/format.h>
+#include <algorithm>
+#include <cmath>
+
+namespace trading {
+
+namespace {
+constexpr double kLegMinUsdc = 1.0;
+constexpr double kFloatTol = 1e-6;
+constexpr double kStatusLogIntervalSec = 30.0;
+constexpr double kBalanceReserve = 0.995;
+} // namespace
+
+LegInHedgeDetector::LegInHedgeDetector(StateStore& store,
+                                       std::vector<MarketInfo> markets,
+                                       double leg1_max_price,
+                                       double target_combined,
+                                       double min_seconds_remaining,
+                                       double leg1_min_seconds_remaining,
+                                       double leg1_cooldown_seconds,
+                                       double rebalance_cooldown_seconds,
+                                       bool use_mirror_prices,
+                                       double leg1_shares,
+                                       bool allow_over_target,
+                                       double force_balance_secs,
+                                       double max_rebalance_shares,
+                                       bool flex_rebalance,
+                                       double flex_dilute_ratio)
+    : store_(store),
+      markets_(std::move(markets)),
+      leg1_max_price_(leg1_max_price),
+      target_combined_(target_combined),
+      min_seconds_remaining_(min_seconds_remaining),
+      leg1_min_seconds_remaining_(leg1_min_seconds_remaining),
+      leg1_cooldown_seconds_(leg1_cooldown_seconds),
+      rebalance_cooldown_seconds_(rebalance_cooldown_seconds),
+      use_mirror_prices_(use_mirror_prices),
+      leg1_shares_(leg1_shares),
+      allow_over_target_(allow_over_target),
+      force_balance_secs_(force_balance_secs),
+      max_rebalance_shares_(max_rebalance_shares),
+      flex_rebalance_(flex_rebalance),
+      flex_dilute_ratio_(flex_dilute_ratio) {}
+
+LegInHedgeDetector::Quote LegInHedgeDetector::quote_for(const MarketInfo& market) const {
+    Quote q;
+    auto side_ask = [&](const std::optional<StateStore::DetectionAsk>& det) -> double {
+        if (!det) return 0.0;
+        if (det->rest_ok) return det->rest_book_ask;
+        if (det->ws_ok) return det->ws_book_ask;
+        return 0.0;
+    };
+
+    if (store_.book_aware_detect()) {
+        const auto yes_det = store_.get_detection_ask(market.yes_token_id);
+        const auto no_det = store_.get_detection_ask(market.no_token_id);
+        q.yes = side_ask(yes_det);
+        q.no = side_ask(no_det);
+        if (q.yes > kFloatTol && q.no > kFloatTol) return q;
+    }
+    if (store_.paper_official_book()) {
+        auto yes = store_.get_official_buy_ask(market.yes_token_id);
+        auto no = store_.get_official_buy_ask(market.no_token_id);
+        if (yes && no && *yes > 0 && *no > 0) {
+            q.yes = *yes;
+            q.no = *no;
+            return q;
+        }
+    }
+    if (use_mirror_prices_) {
+        auto mir = store_.get_mirror_quote(market.asset);
+        if (mir && mir->fresh) {
+            q.yes = mir->book_yes > 0 ? mir->book_yes : mir->ws_yes;
+            q.no = mir->book_no > 0 ? mir->book_no : mir->ws_no;
+            q.from_mirror = true;
+            if (q.yes > 0 && q.no > 0) return q;
+        }
+    }
+    auto yes = store_.get_token_price(market.yes_token_id);
+    auto no = store_.get_token_price(market.no_token_id);
+    if (yes && yes->side == "BUY") q.yes = yes->price;
+    if (no && no->side == "BUY") q.no = no->price;
+    return q;
+}
+
+double LegInHedgeDetector::cap_shares_budget(double shares, double max_usdc, double unit_cost) const {
+    if (shares <= kFloatTol || unit_cost <= kFloatTol) return 0.0;
+    double capped = shares;
+    if (max_rebalance_shares_ > kFloatTol) {
+        capped = std::min(capped, max_rebalance_shares_);
+    }
+    if (max_usdc > kFloatTol) {
+        capped = std::min(capped, max_usdc / unit_cost);
+    }
+    return capped;
+}
+
+double LegInHedgeDetector::cap_shares(double shares, double balance, double unit_cost) const {
+    return cap_shares_budget(shares, balance * kBalanceReserve, unit_cost);
+}
+
+double LegInHedgeDetector::hedge_fill_shares(
+    const std::string& token_id, double gap, double px,
+    double max_usdc, double max_matched_shares) const {
+    if (gap <= kFloatTol || px <= kFloatTol) return 0.0;
+    double fill = cap_shares_budget(std::min(gap, max_matched_shares), max_usdc, px);
+    if (store_.paper_depth_sim()) {
+        fill = store_.walk_ask_fill(token_id, fill).shares;
+    }
+    if (fill * px + kFloatTol < kLegMinUsdc) return 0.0;
+    return fill;
+}
+
+double LegInHedgeDetector::paired_fill_shares(
+    const MarketInfo& market, double yes_p, double no_p,
+    double max_usdc, double max_matched_shares) const {
+    const double combined = yes_p + no_p;
+    if (combined <= kFloatTol || max_matched_shares <= kFloatTol) return 0.0;
+    double fill = cap_shares_budget(max_matched_shares, max_usdc, combined);
+    if (store_.paper_depth_sim()) {
+        fill = store_.walk_paired_fill(
+            market.yes_token_id, market.no_token_id, fill, max_usdc, 1.0).shares;
+    }
+    if (fill * yes_p + kFloatTol < kLegMinUsdc) return 0.0;
+    if (fill * no_p + kFloatTol < kLegMinUsdc) return 0.0;
+    return fill;
+}
+
+void LegInHedgeDetector::log_rebalance_status(
+    const MarketInfo& market, const std::string& key, double now_sec,
+    const risk::LegInHedgePosition& pos, const Quote& q,
+    double yes_avg, double no_avg, double gap) const {
+    auto it = last_status_log_sec_.find(key);
+    if (it != last_status_log_sec_.end() &&
+        (now_sec - it->second) < kStatusLogIntervalSec) {
+        return;
+    }
+    last_status_log_sec_[key] = now_sec;
+
+    const double matched = std::min(pos.yes_shares, pos.no_shares);
+    const double port_avg = (yes_avg > kFloatTol && no_avg > kFloatTol) ? yes_avg + no_avg : 0.0;
+    const bool need_yes = pos.yes_shares < pos.no_shares;
+    const double short_px = need_yes ? q.yes : q.no;
+    const double long_avg = need_yes ? no_avg : yes_avg;
+    const double marginal = long_avg + short_px;
+
+    std::string msg = fmt::format(
+        "[LIH DEBUG] rebalance | {} {}m | YES {:.2f}@{:.4f} NO {:.2f}@{:.4f} | matched {:.1f} gap {:.1f} | "
+        "book {:.4f}/{:.4f} sum {:.4f} | port_avg {:.4f} target {:.2f} | marginal {:.4f} | {:.0f}s left",
+        market.asset, market.window_minutes,
+        pos.yes_shares, yes_avg, pos.no_shares, no_avg,
+        matched, gap, q.yes, q.no, q.yes + q.no,
+        port_avg, target_combined_, marginal,
+        market.end_date_ts - now_sec);
+    spdlog::info(msg);
+    store_.push_telemetry(msg);
+}
+
+void LegInHedgeDetector::log_entry_status(
+    const MarketInfo& market, const std::string& key, double now_sec,
+    const Quote& q, const char* reason) const {
+    auto it = last_entry_log_sec_.find(key);
+    if (it != last_entry_log_sec_.end() &&
+        (now_sec - it->second) < kStatusLogIntervalSec) {
+        return;
+    }
+    last_entry_log_sec_[key] = now_sec;
+
+    const double secs_left = market.end_date_ts - now_sec;
+    std::string msg = fmt::format(
+        "[LIH DEBUG] entry-wait | {} {}m | book {:.4f}/{:.4f} sum {:.4f} | leg1<={:.2f} | {:.0f}s left | {}",
+        market.asset, market.window_minutes, q.yes, q.no, q.yes + q.no,
+        leg1_max_price_, secs_left, reason);
+    spdlog::info(msg);
+    store_.push_telemetry(msg);
+}
+
+std::optional<LegInAction> LegInHedgeDetector::evaluate(double now_ms, risk::RiskManager& rm) {
+    const double now_sec = now_ms / 1000.0;
+    const double max_leg_usdc = rm.get_max_leg_cost_usdc();
+    const double max_matched_cap = rm.get_lih_max_matched_shares();
+
+    for (const auto& market : markets_) {
+        if (market.window_minutes == 5 && !store_.dh_enable_5m()) continue;
+        if (market.window_minutes == 15 && !store_.dh_enable_15m()) continue;
+        if (!store_.dh_asset_enabled(market.window_minutes, market.asset)) continue;
+
+        const double secs_left = market.end_date_ts - now_sec;
+
+        const std::string key = market.asset + "-" + std::to_string(market.window_minutes);
+
+        bool blocked = false;
+        for (const auto& [id, dh] : rm.get_open_dh_positions()) {
+            if (dh.asset == market.asset) {
+                blocked = true;
+                break;
+            }
+        }
+            if (blocked) continue;
+
+        auto open_lih = rm.find_open_lih_by_asset(market.asset, market.window_minutes);
+        Quote q = quote_for(market);
+        if (q.yes <= kFloatTol || q.no <= kFloatTol) {
+            if (!open_lih) log_entry_status(market, key, now_sec, q, "no quote");
+            continue;
+        }
+
+        if (!open_lih) {
+            if (secs_left < leg1_min_seconds_remaining_) {
+                log_entry_status(market, key, now_sec, q, "late window — wait next round");
+                continue;
+            }
+            if (leg1_cooldown_seconds_ > 0.0 &&
+                last_leg1_time_.contains(key) &&
+                (now_sec - last_leg1_time_.at(key)) < leg1_cooldown_seconds_) {
+                log_entry_status(market, key, now_sec, q, "leg1 cooldown");
+                continue;
+            }
+            if (rm.lih_has_open_or_inflight(market.asset, market.window_minutes)) {
+                log_entry_status(market, key, now_sec, q, "leg1 in-flight");
+                continue;
+            }
+            if (rm.lih_other_slot_busy(market.asset, market.window_minutes)) {
+                log_entry_status(market, key, now_sec, q, "other slot active");
+                continue;
+            }
+            if (rm.lih_session_leg1_blocked()) {
+                log_entry_status(market, key, now_sec, q, "session leg cap");
+                continue;
+            }
+            const bool yes_cheap = q.yes <= leg1_max_price_ + kFloatTol;
+            const bool no_cheap = q.no <= leg1_max_price_ + kFloatTol;
+            if (!yes_cheap && !no_cheap) {
+                log_entry_status(market, key, now_sec, q, "no cheap leg");
+                continue;
+            }
+
+            const bool pick_yes = yes_cheap && (!no_cheap || q.yes <= q.no);
+            const double px = pick_yes ? q.yes : q.no;
+            double shares = leg1_shares_;
+            if (max_matched_cap > kFloatTol) {
+                shares = std::min(shares, max_matched_cap);
+            }
+            shares = cap_shares_budget(shares, max_leg_usdc, px);
+            if (store_.paper_depth_sim()) {
+                const auto& tok = pick_yes ? market.yes_token_id : market.no_token_id;
+                shares = store_.walk_ask_fill(tok, shares).shares;
+            }
+            if (shares <= kFloatTol) {
+                log_entry_status(market, key, now_sec, q, "depth fill 0");
+                continue;
+            }
+            if (shares * px + kFloatTol < kLegMinUsdc) {
+                log_entry_status(market, key, now_sec, q, "below min usdc");
+                continue;
+            }
+
+            const double cost = shares * px;
+            const auto [can_open, block_reason] = rm.can_open_lih_leg(
+                cost, false, nullptr, 0.0, &market.asset, market.window_minutes);
+            if (!can_open) {
+                log_entry_status(market, key, now_sec, q, block_reason.c_str());
+                continue;
+            }
+
+            LegInAction act;
+            act.kind = LegInAction::Kind::OpenLeg1;
+            act.market = market;
+            act.buy_yes = pick_yes;
+            act.price = px;
+            act.shares = shares;
+            act.note = q.from_mirror ? "mirror" : "entry";
+            last_leg1_time_[key] = now_sec;
+            return act;
+        }
+
+        if (secs_left < min_seconds_remaining_) continue;
+
+        const auto& pos = *open_lih;
+        const double matched = std::min(pos.yes_shares, pos.no_shares);
+        const double remaining_matched = rm.lih_remaining_matched_shares(pos.lih_id);
+        const double yes_avg = pos.yes_shares > kFloatTol ? pos.yes_cost / pos.yes_shares : 0.0;
+        const double no_avg = pos.no_shares > kFloatTol ? pos.no_cost / pos.no_shares : 0.0;
+        const double gap = std::abs(pos.yes_shares - pos.no_shares);
+        const double port_avg = (yes_avg > kFloatTol && no_avg > kFloatTol) ? yes_avg + no_avg : 0.0;
+
+        if (gap > kFloatTol) {
+            if (rebalance_cooldown_seconds_ > 0.0 &&
+                last_rebalance_time_.contains(key) &&
+                (now_sec - last_rebalance_time_.at(key)) < rebalance_cooldown_seconds_) {
+                log_rebalance_status(market, key, now_sec, pos, q, yes_avg, no_avg, gap);
+                continue;
+            }
+            if (rm.lih_rebalance_inflight(pos.lih_id)) {
+                log_rebalance_status(market, key, now_sec, pos, q, yes_avg, no_avg, gap);
+                continue;
+            }
+            log_rebalance_status(market, key, now_sec, pos, q, yes_avg, no_avg, gap);
+
+            const bool heavy_yes = pos.yes_shares > pos.no_shares + kFloatTol;
+            const bool need_yes = pos.yes_shares < pos.no_shares - kFloatTol;
+            const double heavy_avg = heavy_yes ? yes_avg : no_avg;
+            const double heavy_ask = heavy_yes ? q.yes : q.no;
+            const double light_ask = need_yes ? q.yes : q.no;
+            const auto& light_token = need_yes ? market.yes_token_id : market.no_token_id;
+            const auto& heavy_token = heavy_yes ? market.yes_token_id : market.no_token_id;
+
+            if (heavy_avg <= kFloatTol || light_ask <= kFloatTol) continue;
+
+            const double marginal = heavy_avg + light_ask;
+            const bool at_target = marginal <= target_combined_ + kFloatTol;
+            const bool force = secs_left <= force_balance_secs_;
+
+            auto try_light_hedge = [&](double max_fill, bool require_full_gap) -> std::optional<LegInAction> {
+                const double capped_gap = std::min({gap, max_fill, remaining_matched});
+                if (capped_gap <= kFloatTol) return std::nullopt;
+                const double fill = hedge_fill_shares(
+                    light_token, capped_gap, light_ask, max_leg_usdc, remaining_matched);
+                if (fill <= kFloatTol) return std::nullopt;
+                // 配平/force：单笔预算不够覆盖整个 gap 时不强上
+                if (require_full_gap && fill + kFloatTol < capped_gap) return std::nullopt;
+                const double cost = fill * light_ask;
+                if (!rm.can_open_lih_leg(cost, true, &pos.lih_id, fill).first) return std::nullopt;
+                const char* mode = at_target ? "hedge" : (force ? "force" : (flex_rebalance_ ? "flex-hedge" : "over-target"));
+                LegInAction act;
+                act.kind = LegInAction::Kind::CompleteHedge;
+                act.market = market;
+                act.buy_yes = need_yes;
+                act.price = light_ask;
+                act.shares = fill;
+                act.lih_id = pos.lih_id;
+                act.note = fmt::format("{} +{:.1f}/{:.1f} sum {:.4f} port {:.4f}",
+                                       mode, fill, gap, marginal, port_avg);
+                last_rebalance_time_[key] = now_sec;
+                return act;
+            };
+
+            const double budget_step = cap_shares_budget(leg1_shares_, max_leg_usdc, light_ask);
+
+            if (at_target || force) {
+                if (auto act = try_light_hedge(gap, force)) return act;
+                if (!force && budget_step > kFloatTol) {
+                    if (auto act = try_light_hedge(budget_step, false)) return act;
+                }
+                continue;
+            }
+
+            if (flex_rebalance_) {
+                // Leg1-only: never add to heavy side — only buy the missing (light) leg.
+                if (matched <= kFloatTol && (at_target || force) && budget_step > kFloatTol) {
+                    if (auto act = try_light_hedge(budget_step, force)) return act;
+                    continue;
+                }
+                // Heavy dilute only when both legs already exist (matched pairs).
+                if (matched > kFloatTol &&
+                    heavy_ask + kFloatTol < heavy_avg * flex_dilute_ratio_ &&
+                    heavy_ask <= leg1_max_price_ + kFloatTol) {
+                    double fill = cap_shares_budget(leg1_shares_, max_leg_usdc, heavy_ask);
+                    if (store_.paper_depth_sim()) {
+                        fill = store_.walk_ask_fill(heavy_token, fill).shares;
+                    }
+                    if (fill * heavy_ask + kFloatTol >= kLegMinUsdc) {
+                        const double cost = fill * heavy_ask;
+                        if (rm.can_open_lih_leg(cost, true, &pos.lih_id, 0.0).first) {
+                            const double new_avg = heavy_yes
+                                ? (pos.yes_cost + fill * heavy_ask) / (pos.yes_shares + fill)
+                                : (pos.no_cost + fill * heavy_ask) / (pos.no_shares + fill);
+                            LegInAction act;
+                            act.kind = LegInAction::Kind::HeavyDilute;
+                            act.market = market;
+                            act.buy_yes = heavy_yes;
+                            act.price = heavy_ask;
+                            act.shares = fill;
+                            act.lih_id = pos.lih_id;
+                            act.note = fmt::format("heavy-dilute +{:.1f} {:.4f}->{:.4f} marg {:.4f}->{:.4f}",
+                                                   fill, heavy_avg, new_avg, marginal, new_avg + light_ask);
+                            last_rebalance_time_[key] = now_sec;
+                            return act;
+                        }
+                    }
+                }
+                // Leg1-only (matched==0): wait for cheap hedge or force near expiry; no over-target flex-hedge.
+                if (matched > kFloatTol && budget_step > kFloatTol) {
+                    if (auto act = try_light_hedge(budget_step, false)) return act;
+                }
+                continue;
+            }
+
+            if (!allow_over_target_) continue;
+            if (auto act = try_light_hedge(gap, true)) return act;
+            continue;
+        }
+
+        if (matched <= kFloatTol) continue;
+
+        if (rebalance_cooldown_seconds_ > 0.0 &&
+            last_rebalance_time_.contains(key) &&
+            (now_sec - last_rebalance_time_.at(key)) < rebalance_cooldown_seconds_) {
+            continue;
+        }
+
+        if (rm.lih_rebalance_inflight(pos.lih_id)) continue;
+
+        if (remaining_matched <= kFloatTol) continue;
+
+        if (port_avg > target_combined_ + kFloatTol &&
+            (q.yes + q.no) <= target_combined_ + kFloatTol) {
+            const double fill = paired_fill_shares(
+                market, q.yes, q.no, max_leg_usdc, remaining_matched);
+            if (fill <= kFloatTol) continue;
+            const double cost = fill * (q.yes + q.no);
+            if (!rm.can_open_lih_leg(cost, true, &pos.lih_id, fill).first) continue;
+
+            const double new_yes = (pos.yes_cost + fill * q.yes) / (pos.yes_shares + fill);
+            const double new_no = (pos.no_cost + fill * q.no) / (pos.no_shares + fill);
+            LegInAction act;
+            act.kind = LegInAction::Kind::DilutePaired;
+            act.market = market;
+            act.price = q.yes + q.no;
+            act.shares = fill;
+            act.lih_id = pos.lih_id;
+            act.note = fmt::format("dilute +{:.1f} {:.4f}->{:.4f}", fill, port_avg, new_yes + new_no);
+            last_rebalance_time_[key] = now_sec;
+            return act;
+        }
+
+        if ((q.yes + q.no) <= target_combined_ + kFloatTol) {
+            const double fill = paired_fill_shares(
+                market, q.yes, q.no, max_leg_usdc, remaining_matched);
+            if (fill <= kFloatTol) continue;
+            const double cost = fill * (q.yes + q.no);
+            if (!rm.can_open_lih_leg(cost, true, &pos.lih_id, fill).first) continue;
+
+            LegInAction act;
+            act.kind = LegInAction::Kind::ScalePaired;
+            act.market = market;
+            act.price = q.yes + q.no;
+            act.shares = fill;
+            act.lih_id = pos.lih_id;
+            act.note = fmt::format("scale +{:.1f} sum {:.4f}", fill, q.yes + q.no);
+            last_rebalance_time_[key] = now_sec;
+            return act;
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace trading

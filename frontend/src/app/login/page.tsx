@@ -26,13 +26,20 @@ export default function LoginPage() {
       password,
     });
 
-    if (res?.error) {
-      setError("账号或密码错误");
-      setLoading(false);
-    } else {
+    if (res?.ok) {
       router.push("/dashboard");
       router.refresh();
+      return;
     }
+
+    // Blacklisted IPs get HTTP 404 from server — no UI hint.
+    if (res?.status === 404) {
+      setLoading(false);
+      return;
+    }
+
+    setError("账号或密码错误");
+    setLoading(false);
   };
 
   return (
@@ -59,9 +66,10 @@ export default function LoginPage() {
               <Input
                 id="username"
                 type="text"
-                placeholder="admin"
+                placeholder="账号"
                 autoComplete="username"
                 required
+                maxLength={64}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="h-11 border-border/80 bg-background/80 font-mono"
@@ -74,6 +82,7 @@ export default function LoginPage() {
                 type="password"
                 autoComplete="current-password"
                 required
+                maxLength={128}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="h-11 border-border/80 bg-background/80"

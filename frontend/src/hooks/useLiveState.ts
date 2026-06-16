@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { inferWindowMinutes } from "@/lib/tradeWindow";
 
-export interface DHOpportunity {
+export interface MarketOpportunity {
   question: string;
   asset: string;
   windowMinutes?: number;
@@ -14,9 +14,12 @@ export interface DHOpportunity {
   endDateTs?: number;
 }
 
+/** @deprecated Use MarketOpportunity — kept for backward compatibility */
+export type DHOpportunity = MarketOpportunity;
+
 export interface TradeRecord {
   id: string;
-  strategy: "LA" | "DH"; // LA = legacy history only
+  strategy: "LA" | "DH" | "LIH"; // LA = legacy history only
   asset: string;
   status: "open" | "closed";
   market: string;
@@ -73,10 +76,12 @@ export interface LiveState {
   dailyPnl: number;
   laPnl: number;
   dhPnl: number;
+  lihPnl: number;
   winRate: number;
   openPositions: number;
   totalTrades: number;
   totalDhTrades: number;
+  totalLihTrades: number;
   status: number;
   statusReason: string;
   isPaperMode: boolean;
@@ -96,6 +101,14 @@ export interface LiveState {
   dhEnable5mSol: boolean;
   dhEnable15mBtc: boolean;
   dhEnable15mEth: boolean;
+  lihEnabled: boolean;
+  lihDisableDh: boolean;
+  lihLeg1MaxPrice: number;
+  lihTargetCombined: number;
+  lihUseMirror: boolean;
+  liveLihDryRun?: boolean;
+  tradesBaselineTs?: number;
+  mirrorAssetCount: number;
   riskMaxPositionFraction: number;
   riskDailyLossLimit: number;
   riskTotalDrawdownKill: number;
@@ -107,7 +120,7 @@ export interface LiveState {
   polymarketPrice: number;
   timestamp: number;
   marketsScanned: number;
-  dhOpportunities: DHOpportunity[];
+  dhOpportunities: MarketOpportunity[];
   positionList: OpenPosition[];
   tradeHistory: TradeRecord[];
   telemetryLog: string[];
@@ -121,17 +134,19 @@ const defaultState: LiveState = {
   dailyPnl: 0,
   laPnl: 0,
   dhPnl: 0,
+  lihPnl: 0,
   winRate: 0,
   openPositions: 0,
   totalTrades: 0,
   totalDhTrades: 0,
+  totalLihTrades: 0,
   status: 0,
   statusReason: "",
   isPaperMode: true,
   feeRate: 0.018,
   feeModel: "polymarket_v2_curve",
   useDynamicFees: false,
-  strategy: "dump_hedge",
+  strategy: "leg_in",
   binanceFeedEnabled: true,
   dhSumTarget: 0.95,
   dhMinDiscount: 0.02,
@@ -144,6 +159,13 @@ const defaultState: LiveState = {
   dhEnable5mSol: true,
   dhEnable15mBtc: true,
   dhEnable15mEth: true,
+  lihEnabled: true,
+  lihDisableDh: false,
+  lihLeg1MaxPrice: 0.45,
+  lihTargetCombined: 0.94,
+  lihUseMirror: true,
+  liveLihDryRun: true,
+  mirrorAssetCount: 0,
   riskMaxPositionFraction: 0.08,
   riskDailyLossLimit: 0.2,
   riskTotalDrawdownKill: 0.4,
@@ -173,7 +195,17 @@ function normalizeWinRate(value: unknown): number {
   return Math.min(Math.max(ratio, 0), 1);
 }
 
-function normalizeOpportunities(value: unknown): DHOpportunity[] {
+/** WS may omit lihEnabled on older cores — infer from strategy, default LIH-first. */
+function normalizeLihEnabled(raw: Record<string, unknown>): boolean {
+  if (raw.lihEnabled === true) return true;
+  if (raw.lihEnabled === false) return false;
+  const strat = String(raw.strategy ?? "").toLowerCase();
+  if (strat === "leg_in" || strat === "lih") return true;
+  if (strat === "dump_hedge" || strat === "dh") return false;
+  return true;
+}
+
+function normalizeOpportunities(value: unknown): MarketOpportunity[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => {
     const opp = item as Record<string, unknown>;
@@ -195,7 +227,7 @@ function normalizeOpportunities(value: unknown): DHOpportunity[] {
   });
 }
 
-function normalizePositions(value: unknown, opps: DHOpportunity[], feeRate: number): OpenPosition[] {
+function normalizePositions(value: unknown, opps: MarketOpportunity[], feeRate: number): OpenPosition[] {
   if (!Array.isArray(value)) return [];
 
   return value.map((item) => {
@@ -235,6 +267,8 @@ function normalizePositions(value: unknown, opps: DHOpportunity[], feeRate: numb
       yesCost = yesCost || yesEntryPrice * yesSize;
       noCost = noCost || noEntryPrice * noSize;
       heldSide = heldSide ?? "BOTH";
+    } else if (strategy === "LIH") {
+      heldSide = heldSide ?? ((yesSize > 0 && noSize > 0) ? "BOTH" : yesSize > 0 ? "YES" : "NO");
     } else {
       const isYes = String(p.direction ?? p.side ?? "").toUpperCase().includes("YES") || String(p.side).toUpperCase() === "UP";
       heldSide = heldSide ?? (isYes ? "YES" : "NO");
@@ -279,13 +313,14 @@ function normalizeTradeHistory(value: unknown): TradeRecord[] {
   if (!Array.isArray(value)) return [];
   return value.map((item) => {
     const t = item as Record<string, unknown>;
-    const strategyRaw = String(t.strategy ?? "DH");
-    const strategy = (strategyRaw === "LA" ? "LA" : "DH") as "LA" | "DH";
+    const strategyRaw = String(t.strategy ?? "DH").toUpperCase();
+    const strategy: TradeRecord["strategy"] =
+      strategyRaw === "LA" ? "LA" : strategyRaw === "LIH" ? "LIH" : "DH";
     const market = String(t.market ?? "");
     const windowMinutes = inferWindowMinutes(market, toNumber(t.windowMinutes) || undefined);
     return {
       id: String(t.id ?? ""),
-      strategy: strategy === "DH" ? "DH" : "LA",
+      strategy,
       asset: String(t.asset ?? ""),
       windowMinutes,
       status: String(t.status ?? "closed") === "open" ? "open" : "closed",
@@ -320,7 +355,7 @@ function normalizeStringArray(value: unknown): string[] {
 
 function normalizeLiveState(raw: Record<string, unknown>): LiveState {
   const feeRate = toNumber(raw.feeRate, 0.018) || 0.018;
-  const dhOpportunities = normalizeOpportunities(raw.dhOpportunities);
+  const dhOpportunities = normalizeOpportunities(raw.marketOpportunities ?? raw.dhOpportunities);
   const positionList = normalizePositions(raw.openPositions, dhOpportunities, feeRate);
 
   const openCount = typeof raw.openCount === "number" ? raw.openCount : positionList.length;
@@ -332,17 +367,19 @@ function normalizeLiveState(raw: Record<string, unknown>): LiveState {
     dailyPnl: toNumber(raw.dailyPnl),
     laPnl: toNumber(raw.laPnl),
     dhPnl: toNumber(raw.dhPnl),
+    lihPnl: toNumber(raw.lihPnl),
     winRate: normalizeWinRate(raw.winRate),
     openPositions: openCount,
     totalTrades: toNumber(raw.totalTrades),
     totalDhTrades: toNumber(raw.totalDhTrades),
+    totalLihTrades: toNumber(raw.totalLihTrades),
     status: toNumber(raw.status),
     statusReason: String(raw.statusReason ?? ""),
     isPaperMode: raw.isPaperMode !== false,
     feeRate,
     feeModel: String(raw.feeModel ?? "polymarket_v2_curve"),
     useDynamicFees: raw.useDynamicFees === true,
-    strategy: String(raw.strategy ?? "dump_hedge"),
+    strategy: String(raw.strategy ?? "leg_in"),
     binanceFeedEnabled: raw.binanceFeedEnabled !== false,
     dhSumTarget: toNumber(raw.dhSumTarget, 0.95) || 0.95,
     dhMinDiscount: toNumber(raw.dhMinDiscount, 0.02) || 0.02,
@@ -355,6 +392,14 @@ function normalizeLiveState(raw: Record<string, unknown>): LiveState {
     dhEnable5mSol: raw.dhEnable5mSol !== false,
     dhEnable15mBtc: raw.dhEnable15mBtc !== false,
     dhEnable15mEth: raw.dhEnable15mEth !== false,
+    lihEnabled: normalizeLihEnabled(raw),
+    lihDisableDh: raw.lihDisableDh === true,
+    lihLeg1MaxPrice: toNumber(raw.lihLeg1MaxPrice, 0.45) || 0.45,
+    lihTargetCombined: toNumber(raw.lihTargetCombined, 0.94) || 0.94,
+    lihUseMirror: raw.lihUseMirror !== false,
+    liveLihDryRun: raw.isPaperMode === false ? raw.liveLihDryRun !== false : undefined,
+    tradesBaselineTs: toNumber(raw.tradesBaselineTs, 0) || undefined,
+    mirrorAssetCount: toNumber(raw.mirrorAssetCount, 0) || 0,
     riskMaxPositionFraction: toNumber(raw.riskMaxPositionFraction, 0.08) || 0.08,
     riskDailyLossLimit: toNumber(raw.riskDailyLossLimit, 0.2) || 0.2,
     riskTotalDrawdownKill: toNumber(raw.riskTotalDrawdownKill, 0.4) || 0.4,

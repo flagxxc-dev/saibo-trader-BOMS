@@ -37,7 +37,7 @@ CPP_EIP712 = {
     "post_order_type": "FAK",
 }
 
-CHECKLIST_LIVE = [
+CHECKLIST_LIVE_DH = [
     "日志出现 Starting Core ... Mode: LIVE",
     "出现 [LIVE DH] Sequential dual-leg",
     "两次 [LIVE EXEC] Response 且 size_matched > 0",
@@ -45,6 +45,16 @@ CHECKLIST_LIVE = [
     "Polymarket 网页持仓与 bot 一致",
     "若 Order REJECTED + invalid signature → 停 bot，查 EIP-712",
     "若 NO leg failed → 检查深度；CRITICAL unwind FAILED → 人工处理",
+]
+
+CHECKLIST_LIVE_LIH = [
+    "日志出现 Mode: LIVE | LIH dry-run: on",
+    "出现 [LIVE LIH SHADOW] LEG1 / HEDGE / SCALE（验簿通过、未发单）",
+    "运行 python prelive_lih_check.py — 确认无同 slot 重复 LEG1",
+    "确认 LIVE_LIH_DRY_RUN=true 后再观察 shadow 日志至少数小时",
+    "若要真下单：prelive 通过 + 显式设 LIVE_LIH_DRY_RUN=false 并小仓",
+    "单边到期需 CLOB winner 结算；AUTO_REDEEM 自动赎回",
+    "若 [LIH] CRITICAL unwind FAILED → 人工处理",
 ]
 
 
@@ -69,6 +79,8 @@ def _mask(s: str, show: int = 6) -> str:
 def run_preflight() -> dict:
     load_dotenv()
     paper = _env_bool("PAPER_MODE", True)
+    lih = _env_bool("LIH_ENABLED", True)
+    live_lih_dry = _env_bool("LIVE_LIH_DRY_RUN", True)
     pk = os.getenv("POLYMARKET_PRIVATE_KEY", "").strip()
     signer = os.getenv("POLYMARKET_SIGNER", "").strip()
     funder = os.getenv("POLYMARKET_FUNDER", "").strip()
@@ -111,7 +123,7 @@ def run_preflight() -> dict:
             "POLY_API_KEY_set": bool(os.getenv("POLY_API_KEY", "").strip()),
         },
         "checks": [],
-        "live_first_order_checklist": [] if paper else CHECKLIST_LIVE,
+        "live_first_order_checklist": [] if paper else (CHECKLIST_LIVE_LIH if lih else CHECKLIST_LIVE_DH),
         "warnings": [],
         "ok": True,
     }
@@ -127,6 +139,12 @@ def run_preflight() -> dict:
         check("POLYMARKET_PRIVATE_KEY", report["wallet"]["private_key_set"], "实盘需要有效私钥")
         check("POLYMARKET_FUNDER", bool(funder), "实盘需要 funder 地址")
         check("POLY_API_KEY", report["api_keys"]["POLY_API_KEY_set"], "运行 derive_and_update_keys.py 或手动配置")
+        if lih:
+            check(
+                "LIVE_LIH_DRY_RUN",
+                True,
+                "shadow 验簿" if live_lih_dry else "⚠ false — 将发送真实 LIH 订单",
+            )
 
     # CLOB reachability
     host = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com").rstrip("/")
@@ -165,6 +183,33 @@ def run_preflight() -> dict:
             check("fee_api", False, str(exc))
     else:
         report["warnings"].append("未找到样本 Up/Down 市场，跳过动态费率采样")
+
+    if not paper and lih and not live_lih_dry:
+        report["warnings"].append("LIVE_LIH_DRY_RUN=false — LIH 将发送真实 CLOB 订单")
+
+    if not paper and lih:
+        try:
+            from prelive_lih_check import run_prelive_check
+
+            prelive = run_prelive_check(require_shadow=live_lih_dry, since_baseline=not live_lih_dry)
+            report["prelive_lih"] = prelive
+            # Shadow 模式：prelive 仅作参考，不阻断启动（多盘 btc|5m 会被误报为重复）
+            prelive_ok = prelive.get("ok", False) if not live_lih_dry else True
+            dup_n = len(prelive.get("duplicate_slots", []))
+            check(
+                "prelive_lih",
+                prelive_ok,
+                f"LEG1={prelive.get('leg1_count', 0)} dup_slots={dup_n}"
+                + (" (shadow 参考，不阻断)" if live_lih_dry and dup_n else ""),
+            )
+            if prelive.get("duplicate_slots"):
+                msg = "prelive: 日志中存在同 slot 重复 LEG1 — 修 bug 前不要真下单"
+                if live_lih_dry:
+                    report["warnings"].append(msg + "（shadow 下请人工核对是否为不同 5m 盘）")
+                else:
+                    report["warnings"].append(msg)
+        except Exception as exc:
+            report["warnings"].append(f"prelive_lih_check 跳过: {exc}")
 
     if not paper:
         report["warnings"].append("C++ EIP-712 未与 SDK 自动对照；首单请看 live_first_order_checklist")

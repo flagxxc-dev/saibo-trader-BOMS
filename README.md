@@ -2,7 +2,7 @@
 
 > **Polymarket resolves every 5 minutes. The oracle lags 2.7 seconds behind Binance. This bot lives in that gap — now with C++ execution speeds.**
 
-This is a high-performance port of the original Python arbitrage bot, rebuilt from the ground up in C++20 for sub-millisecond execution. It runs two independent arbitrage strategies — latency arb and structural dump-hedge — protected by adaptive Kelly sizing and a real-time terminal dashboard.
+This is a high-performance Polymarket bot rebuilt in C++20. The **primary strategy is LIH (Leg-In Hedge)**: buy the cheap leg first, then rebalance to a target combined price. Legacy **Dump Hedge (DH)** — simultaneous YES+NO — is archived under [`archive/dh-only/`](archive/dh-only/) (hard to fill in live competition).
 
 [![C++](https://img.shields.io/badge/C++-20-blue)](https://isocpp.org)
 [![Polygon](https://img.shields.io/badge/Network-Polygon_Mainnet-purple)](https://polygon.technology)
@@ -12,10 +12,10 @@ This is a high-performance port of the original Python arbitrage bot, rebuilt fr
 
 ## What This Bot Does
 
-The bot watches Polymarket binary prediction markets (e.g. "Will BTC be higher in 5 minutes?") and places trades when it detects a statistical edge. By utilizing a zero-allocation hot path and circular history buffers in C++, it minimizes the "time-to-fill" after a price move is detected.
+The bot watches Polymarket binary prediction markets (e.g. "Will BTC be higher in 5 minutes?") on **5m / 15m Up-Down windows** (BTC, ETH, SOL).
 
-- **Latency Arb** — exploits the ~2.7-second lag between Binance price moves and Polymarket's oracle update
-- **Dump Hedge** — buys both YES and NO simultaneously when their combined price falls below $1.00, locking in a guaranteed structural profit
+- **LIH (primary)** — wait for a cheap leg (≤ `LIH_LEG1_MAX_PRICE`), enter leg1, rebalance / hedge toward `LIH_TARGET_COMBINED`; paper mode uses official CLOB books + depth simulation
+- **Dump Hedge (legacy)** — buy YES+NO together when combined &lt; $1; see [`archive/dh-only/`](archive/dh-only/) to restore DH-only mode
 
 ---
 

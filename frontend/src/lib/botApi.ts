@@ -1,4 +1,5 @@
 const BOT_API_URL = process.env.BOT_API_URL || "http://127.0.0.1:8081";
+const BOT_API_TOKEN = process.env.BOT_API_TOKEN || "";
 
 export type BotConfig = Record<string, string>;
 
@@ -12,12 +13,16 @@ export interface AuditEvent {
 }
 
 async function botFetch(path: string, init?: RequestInit) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+  if (BOT_API_TOKEN) {
+    headers["X-Bot-Api-Token"] = BOT_API_TOKEN;
+  }
   const res = await fetch(`${BOT_API_URL}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
+    headers,
     cache: "no-store",
   });
   const data = await res.json().catch(() => ({}));
@@ -63,4 +68,11 @@ export async function fetchAuditEvents() {
 
 export async function fetchPreflight() {
   return botFetch("/api/preflight") as Promise<{ preflight: Record<string, unknown> }>;
+}
+
+export async function fetchClobTrades(limit = 200) {
+  return botFetch(`/api/clob/trades?limit=${limit}`) as Promise<{
+    trades: Array<Record<string, unknown>>;
+    count: number;
+  }>;
 }

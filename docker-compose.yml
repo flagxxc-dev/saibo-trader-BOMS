@@ -17,6 +17,13 @@ services:
     volumes:
       - ./.env:/app/.env
       - ./logs:/app/logs
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "localhost,127.0.0.1,host.docker.internal,clob.polymarket.com,gamma-api.polymarket.com,ws-subscriptions-clob.polymarket.com,polymarket.com,data-api.polymarket.com,api.binance.com"
+      no_proxy: "localhost,127.0.0.1,host.docker.internal,clob.polymarket.com,gamma-api.polymarket.com,ws-subscriptions-clob.polymarket.com,polymarket.com,data-api.polymarket.com,api.binance.com"
     networks:
       default:
         aliases:
@@ -42,8 +49,8 @@ services:
       BOT_API_URL: http://bot:8081
       NEXTAUTH_URL: http://127.0.0.1:3001
       NEXTAUTH_SECRET: change-me-in-production
-      AUTH_USERNAME: admin
-      AUTH_PASSWORD: change-me-in-production
+      AUTH_USERNAME: zhan
+      AUTH_PASSWORD: qilai
       PORT: "3001"
       HOSTNAME: 0.0.0.0
       AUTH_TRUST_HOST: "true"
@@ -52,6 +59,29 @@ services:
     depends_on:
       bot:
         condition: service_healthy
+
+  # Optional: docker compose --profile mirror up -d mirror
+  mirror:
+    profiles: ["mirror"]
+    image: polymarket-cpp-bot:latest
+    container_name: polymarket-cpp-mirror
+    restart: unless-stopped
+    entrypoint: ["python3", "scripts/mirror_server_live.py"]
+    depends_on:
+      bot:
+        condition: service_healthy
+    volumes:
+      - ./.deploy.local:/app/.deploy.local:ro
+      - ./logs:/app/logs
+    environment:
+      LOCAL_MIRROR_URL: http://bot:8081/api/mirror
+      SERVER_SSH_HOST: 70.34.221.132
+      MIRROR_POLL_SEC: "5"
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "bot,localhost,127.0.0.1"
 
 volumes:
   frontend-db:

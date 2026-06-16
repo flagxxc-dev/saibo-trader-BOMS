@@ -258,6 +258,80 @@ std::vector<MarketInfo> GammaClient::fetch_updown_markets(const std::string& ass
     return results;
 }
 
+std::optional<SettlementOutcome> GammaClient::fetch_settlement_outcomes(const std::string& condition_id) {
+    if (condition_id.empty()) return std::nullopt;
+
+    // CLOB first — Up/Down markets expose token.winner reliably; Gamma condition_id
+    // queries often return stale/wrong rows for short-lived crypto markets.
+    try {
+        std::string body = http_get("clob.polymarket.com", "/markets/" + condition_id);
+        auto jv = boost::json::parse(body);
+        if (jv.is_object() && jv.as_object().contains("tokens")) {
+            double yes_p = 0.0;
+            double no_p = 0.0;
+            bool yes_set = false;
+            bool no_set = false;
+            for (const auto& t : jv.as_object().at("tokens").as_array()) {
+                const auto& tok = t.as_object();
+                if (!tok.contains("outcome") || !tok.contains("winner")) continue;
+                std::string outcome = std::string(tok.at("outcome").as_string());
+                bool winner = tok.at("winner").as_bool();
+                const double payout = winner ? 1.0 : 0.0;
+                if (outcome == "Up" || outcome == "Yes") {
+                    yes_p = payout;
+                    yes_set = true;
+                } else if (outcome == "Down" || outcome == "No") {
+                    no_p = payout;
+                    no_set = true;
+                }
+            }
+            if (yes_set && no_set && yes_p + no_p == 1.0) {
+                SettlementOutcome out;
+                out.yes_payout = yes_p;
+                out.no_payout = no_p;
+                out.resolved = true;
+                return out;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("CLOB settlement lookup failed for {}: {}", condition_id.substr(0, 12), e.what());
+    }
+
+    try {
+        std::string target = "/markets?condition_id=" + condition_id;
+        std::string body = http_get("gamma-api.polymarket.com", target);
+        auto jv = boost::json::parse(body);
+        if (jv.is_array() && !jv.as_array().empty()) {
+            const auto& gm = jv.as_array().at(0).as_object();
+            bool closed = false;
+            if (gm.contains("closed")) {
+                const auto& cv = gm.at("closed");
+                if (cv.is_bool()) closed = cv.as_bool();
+            }
+            if (gm.contains("outcomePrices")) {
+                std::string prices_str = std::string(gm.at("outcomePrices").as_string());
+                auto prices = boost::json::parse(prices_str).as_array();
+                if (prices.size() >= 2) {
+                    double yes_p = std::stod(std::string(prices[0].as_string()));
+                    double no_p = std::stod(std::string(prices[1].as_string()));
+                    if (closed || (yes_p >= 0.99 && no_p <= 0.01) || (no_p >= 0.99 && yes_p <= 0.01)) {
+                        SettlementOutcome out;
+                        out.yes_payout = (yes_p >= 0.5) ? 1.0 : 0.0;
+                        out.no_payout = (no_p >= 0.5) ? 1.0 : 0.0;
+                        if (out.yes_payout + out.no_payout == 1.0) {
+                            out.resolved = true;
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::debug("Gamma settlement lookup failed for {}: {}", condition_id.substr(0, 12), e.what());
+    }
+    return std::nullopt;
+}
+
 bool GammaClient::fetch_and_cache_market_fees(const std::string& condition_id, StateStore& store) {
     if (condition_id.empty()) return false;
     try {

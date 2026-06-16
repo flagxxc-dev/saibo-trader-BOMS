@@ -53,7 +53,7 @@ export function parseTradeRow(line: string): ParsedTradeRow {
     };
   }
 
-  const placed = line.match(/^\[(LA|DH)\]\s+PLACED\s+(.+)$/i);
+  const placed = line.match(/^\[(LA|DH|LIH)\]\s+PLACED\s+(.+)$/i);
   if (placed) {
     return {
       kind,

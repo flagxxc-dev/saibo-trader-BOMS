@@ -4,9 +4,16 @@ import bcrypt from "bcryptjs";
 const prisma = new PrismaClient();
 
 async function main() {
-  const username = process.env.AUTH_USERNAME?.trim() || "admin";
-  const password = process.env.AUTH_PASSWORD?.trim() || "change-me-in-production";
+  const username = process.env.AUTH_USERNAME?.trim();
+  const password = process.env.AUTH_PASSWORD?.trim();
+  if (!username || !password) {
+    throw new Error("AUTH_USERNAME and AUTH_PASSWORD must be set before seeding");
+  }
   const hashedPassword = await bcrypt.hash(password, 10);
+
+  await prisma.user.deleteMany({
+    where: { email: { not: username } },
+  });
 
   await prisma.user.upsert({
     where: { email: username },

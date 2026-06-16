@@ -1,7 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Smaller production footprint on ~1GB VPS (run via scripts/web_run.sh)
+  output: "standalone",
+  poweredByHeader: false,
+  compress: true,
 };
 
 export default nextConfig;

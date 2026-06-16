@@ -246,12 +246,18 @@ class Dashboard:
         d = self.data
         la_trades = d.get("totalTrades", 0)
         dh_trades = d.get("totalDhTrades", 0)
+        lih_trades = d.get("totalLihTrades", 0)
+        lih_on = d.get("lihEnabled", True)
+        strat_label = "LIH primary" if lih_on else "DH legacy"
 
         t = Table.grid(expand=True)
         t.add_column(width=16, style="dim")
         t.add_column()
-        t.add_row("Strategy",      Text("DH only", style="bold green"))
-        t.add_row("DH Trades",     Text(str(dh_trades), style="magenta"))
+        t.add_row("Strategy",      Text(strat_label, style="bold green"))
+        if lih_on:
+            t.add_row("LIH Trades",    Text(str(lih_trades), style="cyan"))
+        else:
+            t.add_row("DH Trades",     Text(str(dh_trades), style="magenta"))
         if la_trades:
             t.add_row("Legacy LA", Text(str(la_trades), style="dim"))
         t.add_row("Execution",     "Event-driven C++")
@@ -268,6 +274,8 @@ class Dashboard:
         daily_pnl = d.get("dailyPnl",  0.0)
         total_pnl = d.get("totalPnl",  0.0)
         dh_pnl    = d.get("dhPnl",     0.0)
+        lih_pnl   = d.get("lihPnl",    0.0)
+        lih_on    = d.get("lihEnabled", True)
         open_pos  = d.get("openCount", 0)
         drawdown  = d.get("maxDrawdownPct", 0.0)
         is_paper  = d.get("isPaperMode", True)
@@ -282,11 +290,14 @@ class Dashboard:
         t.add_row("Balance",   Text(f"${balance:,.2f} USDC", style="bold green"))
         t.add_row("Daily PnL", self._pnl_text(daily_pnl))
         t.add_row("Total PnL", self._pnl_text(total_pnl))
-        t.add_row("DH PnL",    Text(f"{'+' if dh_pnl>=0 else ''}${dh_pnl:.2f}", style="magenta"))
-        dh_trades = d.get("totalDhTrades", 0)
+        if lih_on:
+            t.add_row("LIH PnL",   Text(f"{'+' if lih_pnl>=0 else ''}${lih_pnl:.2f}", style="cyan"))
+        else:
+            t.add_row("DH PnL",    Text(f"{'+' if dh_pnl>=0 else ''}${dh_pnl:.2f}", style="magenta"))
+        closed = d.get("totalLihTrades", 0) if lih_on else d.get("totalDhTrades", 0)
         wr        = d.get("winRate", 0.0)
 
-        t.add_row("Win Rate",  Text(f"{wr:.1f}%  ({dh_trades} DH)", style="white"))
+        t.add_row("Win Rate",  Text(f"{wr:.1f}%  ({closed} closed)", style="white"))
         t.add_row("Open Pos",  f"{open_pos} / 3")
         t.add_row("Max Drawdown", Text(f"${abs(total_pnl - 0):.2f} ({drawdown:.2f}%)",
                                        style="red" if drawdown > 5 else "white"))
@@ -348,12 +359,13 @@ class Dashboard:
         sc = STATUS_COLORS.get(status, "bold white")
         is_paper  = d.get("isPaperMode", True)
         start_bal = d.get("startingBalance", 1000.0)
+        strat_footer = "STRATEGY: LIH" if d.get("lihEnabled", True) else "STRATEGY: DH (legacy)"
         
         footer = Text.assemble(
             (f" ● {sl} ", sc), "│ ",
             ("PAPER MODE" if is_paper else "LIVE TRADING", "bold yellow" if is_paper else "bold green"),
             (f" · ${start_bal:,.0f} BASE", "white"), " │ POLYGON:137 │ ",
-            ("STRATEGY: LA + DH", "cyan"), " │ Ctrl+C to stop",
+            (strat_footer, "cyan"), " │ Ctrl+C to stop",
         )
         layout["footer"].update(footer)
         return layout

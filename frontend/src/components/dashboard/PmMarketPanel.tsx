@@ -4,15 +4,17 @@ import { useEffect, useMemo, useRef } from "react";
 import { GlassCard, CardContent, CardHeader, CardTitle } from "@/components/shared/GlassCard";
 import { createChart, ISeriesApi, LineSeries } from "lightweight-charts";
 import { LineChart } from "lucide-react";
-import type { DHOpportunity } from "@/hooks/useLiveState";
+import type { MarketOpportunity } from "@/hooks/useLiveState";
 
 interface PmMarketPanelProps {
-  opportunities: DHOpportunity[];
+  opportunities: MarketOpportunity[];
   dhSumTarget: number;
   dhMinDiscount: number;
   feeRate: number;
   timestamp: number;
   marketsScanned: number;
+  lihEnabled?: boolean;
+  lihTargetCombined?: number;
 }
 
 interface WindowConfig {
@@ -48,10 +50,10 @@ function seriesKey(windowMinutes: number, asset: string): string {
 }
 
 function bestByAsset(
-  opportunities: DHOpportunity[],
+  opportunities: MarketOpportunity[],
   windowMinutes: number,
   assets: string[]
-): Map<string, DHOpportunity> {
+): Map<string, MarketOpportunity> {
   const active = opportunities.filter(
     (o) =>
       (o.windowMinutes ?? 5) === windowMinutes &&
@@ -60,7 +62,7 @@ function bestByAsset(
       o.noPrice > 0 &&
       o.combined > 0
   );
-  const map = new Map<string, DHOpportunity>();
+  const map = new Map<string, MarketOpportunity>();
   for (const o of active) {
     const prev = map.get(o.asset);
     if (!prev || (o.endDateTs ?? 0) < (prev.endDateTs ?? Infinity)) map.set(o.asset, o);
@@ -75,13 +77,17 @@ function WindowSection({
   dhMinDiscount,
   feeRate,
   timestamp,
+  lihMode = false,
+  combinedTarget,
 }: {
   config: WindowConfig;
-  opportunities: DHOpportunity[];
+  opportunities: MarketOpportunity[];
   dhSumTarget: number;
   dhMinDiscount: number;
   feeRate: number;
   timestamp: number;
+  lihMode?: boolean;
+  combinedTarget?: number;
 }) {
   const chartRef = useRef<HTMLDivElement>(null);
   const seriesRef = useRef<Record<string, ISeriesApi<"Line">>>({});
@@ -155,12 +161,14 @@ function WindowSection({
     }
   }, [timestamp, bestMap, config.minutes]);
 
+  const target = combinedTarget ?? dhSumTarget;
+
   return (
     <div className="space-y-4 rounded-xl border border-white/5 bg-white/[0.015] p-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <h3 className="text-sm font-semibold text-white/80">{config.label}</h3>
         <span className="text-[10px] font-mono text-white/35">
-          {config.tradeable ? "参与 DH 开仓" : "仅行情展示"}
+          {config.tradeable ? (lihMode ? "LIH 可交易" : "参与 DH 开仓") : "仅行情展示"}
         </span>
       </div>
 
@@ -169,8 +177,9 @@ function WindowSection({
           const o = bestMap.get(asset);
           const combined = o?.combined ?? 0;
           const net = combined > 0 ? dhNetDiscount(combined, feeRate) : 0;
-          const ok =
-            config.tradeable && combined > 0 && combined <= dhSumTarget && net >= dhMinDiscount;
+          const ok = lihMode
+            ? config.tradeable && combined > 0 && combined <= target
+            : config.tradeable && combined > 0 && combined <= dhSumTarget && net >= dhMinDiscount;
           return (
             <div key={asset} className="rounded-lg border border-white/5 bg-white/[0.02] px-3 py-2.5">
               <div className="text-[10px] uppercase tracking-widest text-white/35">{asset}</div>
@@ -213,7 +222,9 @@ function WindowSection({
             ) : (
               active.map((o, i) => {
                 const net = dhNetDiscount(o.combined, feeRate);
-                const ok = o.combined <= dhSumTarget && net >= dhMinDiscount;
+                const ok = lihMode
+                  ? o.combined <= target
+                  : o.combined <= dhSumTarget && net >= dhMinDiscount;
                 return (
                   <tr
                     key={`${o.asset}-${o.endDateTs ?? i}`}
@@ -255,7 +266,12 @@ export function PmMarketPanel({
   feeRate,
   timestamp,
   marketsScanned,
+  lihEnabled = true,
+  lihTargetCombined,
 }: PmMarketPanelProps) {
+  const lihMode = lihEnabled;
+  const combinedTarget = lihTargetCombined ?? dhSumTarget;
+
   return (
     <GlassCard>
       <CardHeader>
@@ -265,12 +281,15 @@ export function PmMarketPanel({
             实时行情
           </CardTitle>
           <div className="text-[11px] font-mono text-muted-foreground">
-            扫描 {marketsScanned} 个市场 · DH 5m+15m · 合价目标 ≤ {dhSumTarget.toFixed(2)}
+            扫描 {marketsScanned} 个市场 · {lihMode ? "LIH" : "DH"} 5m+15m · 合价参考 ≤{" "}
+            {combinedTarget.toFixed(2)}
           </div>
         </div>
         <p className="text-[11px] text-muted-foreground mt-2 leading-relaxed">
-          YES+NO 卖一合价。5m / 15m 市场参与 DH 开仓（净折扣 ≥ {(dhMinDiscount * 100).toFixed(1)}% 且合价 ≤{" "}
-          {dhSumTarget}）。
+          YES+NO 卖一合价。
+          {lihMode
+            ? ` LIH 关注单腿低价与 rebalance 至 ≤ ${combinedTarget.toFixed(2)}。`
+            : ` 5m / 15m 参与 DH 开仓（净折扣 ≥ ${(dhMinDiscount * 100).toFixed(1)}% 且合价 ≤ ${dhSumTarget}）。`}
         </p>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -283,6 +302,8 @@ export function PmMarketPanel({
             dhMinDiscount={dhMinDiscount}
             feeRate={feeRate}
             timestamp={timestamp}
+            lihMode={lihMode}
+            combinedTarget={combinedTarget}
           />
         ))}
       </CardContent>

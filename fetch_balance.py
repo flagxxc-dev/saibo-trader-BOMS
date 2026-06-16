@@ -60,32 +60,29 @@ def on_chain_collateral_total(funder: str) -> float:
     return total
 
 
+from clob_live import _resolve_signature_type as resolve_signature_type
+
+
 def fetch_clob_collateral(pk: str, funder: str, signer: str) -> float:
     from py_clob_client_v2.client import ClobClient
     from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
 
-    is_proxy = funder.lower() != signer.lower() if signer else True
-    sig_type = 1 if is_proxy else 0
-
-    if is_proxy:
-        client = ClobClient(HOST, key=pk, chain_id=CHAIN_ID, signature_type=1, funder=funder)
-    else:
-        client = ClobClient(HOST, key=pk, chain_id=CHAIN_ID)
+    sig_type = resolve_signature_type(funder, signer)
+    client = ClobClient(
+        HOST, key=pk, chain_id=CHAIN_ID, signature_type=sig_type, funder=funder
+    )
 
     creds = client.derive_api_key()
-    if is_proxy:
-        auth = ClobClient(
-            HOST, key=pk, chain_id=CHAIN_ID, signature_type=1, funder=funder, creds=creds
-        )
-    else:
-        auth = ClobClient(HOST, key=pk, chain_id=CHAIN_ID, creds=creds)
+    auth = ClobClient(
+        HOST, key=pk, chain_id=CHAIN_ID, signature_type=sig_type, funder=funder, creds=creds
+    )
 
     # Refresh CLOB balance cache (required after on-chain deposits / V2 migration)
     try:
         auth.update_balance_allowance(
             params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig_type)
         )
-        print("[fetch_balance] CLOB balance cache refreshed", file=sys.stderr)
+        print(f"[fetch_balance] CLOB balance cache refreshed (sig_type={sig_type})", file=sys.stderr)
     except Exception as exc:
         print(f"[fetch_balance] update_balance_allowance warn: {exc}", file=sys.stderr)
 

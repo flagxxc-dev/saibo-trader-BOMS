@@ -11,6 +11,12 @@ namespace trading {
 
 class StateStore;
 
+struct SettlementOutcome {
+    double yes_payout = 0.0;
+    double no_payout = 0.0;
+    bool resolved = false;
+};
+
 class GammaClient {
 public:
     GammaClient(boost::asio::io_context& ioc, boost::asio::ssl::context& ctx);
@@ -21,6 +27,9 @@ public:
     // Returns nullopt on any error. BLOCKING — must run on gamma_ioc, never feed_ioc.
     std::optional<double> fetch_token_price(const std::string& token_id, const std::string& side = "BUY");
     std::optional<double> fetch_binance_price(const std::string& symbol);
+
+    // Official resolution payouts (0/1) from Gamma or CLOB after market closes.
+    std::optional<SettlementOutcome> fetch_settlement_outcomes(const std::string& condition_id);
 
     // Cache Polymarket V2 fee curve (fd.r / fd.e) per token from /clob-markets/{condition_id}.
     bool fetch_and_cache_market_fees(const std::string& condition_id, StateStore& store);

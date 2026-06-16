@@ -149,12 +149,11 @@ void PolymarketFeed::process_message(std::string_view msg) {
 
                 spdlog::debug("PM tick: token={}.. price={:.3f} side={}", token_id.substr(0,12), price, side);
                 if (side == "SELL") {
-                    // Maker SELL = Ask = price we BUY at
                     tp.side = "BUY";
+                    store_.update_ws_book_ask(token_id, tp);
                     store_.update_token_price(token_id, tp);
                     if (tick_callback_) tick_callback_(token_id);
                 } else {
-                    // Maker BUY = Bid — store separately for reference
                     tp.side = "SELL";
                     store_.update_token_bid(token_id, tp);
                 }
@@ -175,6 +174,7 @@ void PolymarketFeed::process_message(std::string_view msg) {
                     tp.price = best_ask;
                     tp.side = "BUY";
                     tp.ts = now_ts;
+                    store_.update_ws_book_ask(token_id, tp);
                     store_.update_token_price(token_id, tp);
                     if (tick_callback_) tick_callback_(token_id);
                 }

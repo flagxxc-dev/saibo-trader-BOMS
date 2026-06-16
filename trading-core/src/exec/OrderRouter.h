@@ -18,18 +18,27 @@
 #include <boost/json.hpp>
 
 namespace trading {
+struct LegInAction;
 namespace exec {
 
 struct LegFillResult {
     bool success = false;
     double price = 0.0;
     double size_shares = 0.0;
+    std::string order_id;
+    /** Order submitted but fill not confirmed — do not release in-flight locks. */
+    bool pending_fill = false;
 };
 
 struct BookAskInfo {
     bool ok = false;
     double best_ask = 0.0;
     double depth_shares = 0.0;
+};
+
+struct BookBidInfo {
+    bool ok = false;
+    double best_bid = 0.0;
 };
 
 class OrderRouter {
@@ -49,9 +58,19 @@ public:
                 const std::string& api_secret = "",
                 const std::string& api_passphrase = "",
                 const std::string& neg_risk_exchange = "",
-                bool live_dh_dry_run = false);
+                bool live_dh_dry_run = false,
+                bool live_lih_dry_run = true,
+                bool use_python_clob = false,
+                const std::string& clob_bridge_host = "127.0.0.1",
+                int clob_bridge_port = 8081,
+                const std::string& clob_bridge_path = "/internal/clob/order");
 
     ~OrderRouter();
+
+    /** Live LIH execution (book-aware). Returns false on validation failure. No-op in paper mode. */
+    bool submit_lih_action(const trading::LegInAction& act, double now_sec);
+
+    bool live_lih_dry_run() const { return live_lih_dry_run_; }
 
     bool submit_order(const std::string& token_id, 
                       double price, 
@@ -60,6 +79,10 @@ public:
                       bool is_neg_risk = false);
 
     bool check_book_depth(const std::string& token_id, double price, double size_shares);
+
+    // Scheme A: poll CLOB REST order book into StateStore (asks for entry, bids for marks).
+    void refresh_rest_book(const std::vector<std::string>& token_ids);
+    void refresh_rest_book_asks(const std::vector<std::string>& token_ids);
 
     // Sum of ask sizes at or below price * 1.02; -1 on fetch/parse failure.
     double query_ask_depth_shares(const std::string& token_id, double price);
@@ -81,15 +104,35 @@ private:
     std::string funder_address_;
     bool paper_mode_;
     bool live_dh_dry_run_;
+    bool live_lih_dry_run_;
     std::string api_key_;
     std::string api_secret_;
     std::string api_passphrase_;
     std::string neg_risk_exchange_;
+    bool use_python_clob_;
+    std::string clob_bridge_host_;
+    int clob_bridge_port_;
+    std::string clob_bridge_path_;
     
     std::unique_ptr<EIP712Signer> signer_;
     std::unique_ptr<EIP712Signer> signer_neg_risk_;
 
     Order build_order(const std::string& token_id, double price, double size_shares, uint8_t side) const;
+
+    LegFillResult execute_via_clob_bridge(
+        const std::string& token_id,
+        double price,
+        double size_shares,
+        uint8_t side,
+        bool is_neg_risk,
+        bool register_position,
+        const std::string& asset,
+        const std::string& question,
+        double end_date_ts,
+        const std::string& strategy,
+        const std::string& original_order_id,
+        const std::string& position_id_salt
+    );
 
     // When register_position=false, sends to CLOB only (used for DH legs / unwind).
     LegFillResult execute_rest_order(
@@ -111,6 +154,8 @@ private:
 
     std::optional<boost::json::object> fetch_book_object(const std::string& token_id);
     BookAskInfo parse_book_asks(const boost::json::object& book) const;
+    std::vector<trading::StateStore::BookLevel> parse_ask_ladder(const boost::json::object& book) const;
+    BookBidInfo parse_book_bids(const boost::json::object& book) const;
     BookAskInfo fetch_book_ask_info(const std::string& token_id);
 
     EIP712Signer& pick_signer(bool is_neg_risk) const;

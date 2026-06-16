@@ -42,6 +42,7 @@ set(SOURCES
     src/exec/EIP712Signer.cpp
     src/exec/OrderRouter.cpp
     src/signals/DumpHedgeDetector.cpp
+    src/signals/LegInHedgeDetector.cpp
 )
 
 add_executable(trading-core ${SOURCES})

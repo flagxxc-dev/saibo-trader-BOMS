@@ -32,7 +32,9 @@ std::string reject_label(const std::string& code) {
     if (code == "no_price") return "no_price";
     if (code == "bad_side") return "bad_side";
     if (code == "sum_high") return "sum_high";
-    if (code == "disc_low") return "disc_low";
+    if (code == "book_stale") return "book_stale";
+    if (code == "book_sum_high") return "book_sum_high";
+    if (code == "book_disc_low") return "book_disc_low";
     return code;
 }
 
@@ -107,26 +109,30 @@ std::optional<DumpHedgeSignal> DumpHedgeDetector::evaluate(double current_time_m
             continue;
         }
 
-        auto yes_price_opt = state_store_.get_token_price(market.yes_token_id);
-        auto no_price_opt = state_store_.get_token_price(market.no_token_id);
+        auto yes_det = state_store_.get_detection_ask(market.yes_token_id);
+        auto no_det = state_store_.get_detection_ask(market.no_token_id);
 
-        if (!yes_price_opt || !no_price_opt) {
+        if (!yes_det || !no_det) {
             consider_near_miss(near_miss, DhNearMiss{
                 .valid = true, .asset = market.asset, .window_minutes = market.window_minutes,
                 .seconds_remaining = seconds_remaining, .reason = "no_price", .score = -700.0});
             continue;
         }
 
-        if (yes_price_opt->side != "BUY" || no_price_opt->side != "BUY") {
-            consider_near_miss(near_miss, DhNearMiss{
-                .valid = true, .asset = market.asset, .window_minutes = market.window_minutes,
-                .yes_price = yes_price_opt->price, .no_price = no_price_opt->price,
-                .seconds_remaining = seconds_remaining, .reason = "bad_side", .score = -600.0});
-            continue;
+        if (state_store_.book_aware_detect()) {
+            if (!yes_det->rest_ok || !no_det->rest_ok) {
+                consider_near_miss(near_miss, DhNearMiss{
+                    .valid = true, .asset = market.asset, .window_minutes = market.window_minutes,
+                    .yes_price = yes_det->rest_book_ask, .no_price = no_det->rest_book_ask,
+                    .seconds_remaining = seconds_remaining, .reason = "book_stale", .score = -650.0});
+                continue;
+            }
         }
 
-        double yes_price = yes_price_opt->price;
-        double no_price = no_price_opt->price;
+        const double yes_price = state_store_.book_aware_detect()
+            ? yes_det->rest_book_ask : yes_det->conservative_ask;
+        const double no_price = state_store_.book_aware_detect()
+            ? no_det->rest_book_ask : no_det->conservative_ask;
 
         if (yes_price <= 0 || no_price <= 0) continue;
 
@@ -148,13 +154,13 @@ std::optional<DumpHedgeSignal> DumpHedgeDetector::evaluate(double current_time_m
         };
 
         if (combined > sum_target_) {
-            priced.reason = "sum_high";
+            priced.reason = state_store_.book_aware_detect() ? "book_sum_high" : "sum_high";
             priced.score = discount - (combined - sum_target_);
             consider_near_miss(near_miss, priced);
             continue;
         }
         if (discount < min_discount_) {
-            priced.reason = "disc_low";
+            priced.reason = state_store_.book_aware_detect() ? "book_disc_low" : "disc_low";
             priced.score = discount;
             consider_near_miss(near_miss, priced);
             continue;
@@ -217,10 +223,15 @@ std::optional<DumpHedgeSignal> DumpHedgeDetector::evaluate(double current_time_m
     if (best_signal) {
         last_signal_time_[dh_market_key(best_signal->market)] = current_time_ms;
         signals_generated_++;
-        std::string msg = fmt::format("DUMP-HEDGE DETECTED [#{}] | {} {}m | YES: {:.3f} NO: {:.3f} | Sum: {:.3f} | Locked: {:.3f}/share",
-                                      signals_generated_, best_signal->asset, best_signal->market.window_minutes,
-                                      best_signal->yes_price, best_signal->no_price,
-                                      best_signal->combined_price, best_signal->discount);
+        auto yd = state_store_.get_detection_ask(best_signal->yes_token_id);
+        auto nd = state_store_.get_detection_ask(best_signal->no_token_id);
+        const double ws_y = yd ? yd->ws_book_ask : 0.0;
+        const double ws_n = nd ? nd->ws_book_ask : 0.0;
+        std::string msg = fmt::format(
+            "DUMP-HEDGE DETECTED [#{}] | {} {}m | REST YES: {:.3f} NO: {:.3f} | Sum: {:.3f} | Locked: {:.3f}/share | WS {:.3f}/{:.3f}",
+            signals_generated_, best_signal->asset, best_signal->market.window_minutes,
+            best_signal->yes_price, best_signal->no_price,
+            best_signal->combined_price, best_signal->discount, ws_y, ws_n);
         spdlog::log(spdlog::level::info, msg);
     }
 

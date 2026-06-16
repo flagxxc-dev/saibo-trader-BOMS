@@ -10,7 +10,7 @@ A Polymarket arbitrage bot trading binary "Up or Down" markets (BTC/ETH/SOL/XRP,
 2. **Python glue at repo root** — `dashboard_bridge.py` (WS server), `cli_dashboard.py` (Rich terminal UI), plus helper scripts the C++ core shells out to.
 3. **`frontend/`** — Next.js 16 web dashboard (Prisma + SQLite, NextAuth, Tailwind 4).
 
-The active strategy is **Dump Hedge (DH) only**: buy YES+NO simultaneously when their combined price falls below $1.00 (`DH_SUM_TARGET`). Latency arb was removed from the code in commit 4829ceb — the README and SPECS.md still describe it, so treat those docs as partially stale.
+The active strategy is **Leg-In Hedge (LIH)**: buy the cheap leg first, then rebalance / hedge to target combined price (`LIH_TARGET_COMBINED`). **Dump Hedge (DH)** is archived under `archive/dh-only/` — set `LIH_ENABLED=false` to restore DH-only mode. Latency arb was removed from the code in commit 4829ceb — the README and SPECS.md still describe it, so treat those docs as partially stale.
 
 ## Commands
 
@@ -51,7 +51,7 @@ trading-core (C++) ──stdout JSON lines──> dashboard_bridge.py ──ws:/
 ### C++ core (`trading-core/src/`)
 
 - `main.cpp` — orchestrator: parses `.env` itself (`load_env(".env")`, no library), runs the event loop, fetches USDC balance via Polygon RPC, triggers auto-redeem.
-- `signals/DumpHedgeDetector` — the only strategy; `feeds/` — `BinanceFeed` (spot reference, gated by `BINANCE_FEED_ENABLED`), `PolymarketFeed` (CLOB WS), `GammaClient` (market discovery); `risk/RiskManager`; `exec/EIP712Signer` + `OrderRouter` (Polygon order signing/submission); `state/StateStore` (circular price-history buffers) and `PaperStateStore` (paper ledger, persisted to `logs/paper_state.json` when `PAPER_STATE_PERSIST=true`).
+- `signals/LegInHedgeDetector` — primary strategy (paper-only today); `signals/DumpHedgeDetector` — legacy DH (inactive when `LIH_ENABLED=true`); `feeds/` — `BinanceFeed` (spot reference, gated by `BINANCE_FEED_ENABLED`), `PolymarketFeed` (CLOB WS), `GammaClient` (market discovery); `risk/RiskManager`; `exec/EIP712Signer` + `OrderRouter` (Polygon order signing/submission); `state/StateStore` (circular price-history buffers) and `PaperStateStore` (paper ledger, persisted to `logs/paper_state.json` when `PAPER_STATE_PERSIST=true`).
 - Adding a `.cpp` file requires listing it in `trading-core/CMakeLists.txt` `SOURCES`.
 
 ### C++ ↔ Python coupling
@@ -71,7 +71,7 @@ So the core must run from the repo root, and changes to these scripts' stdout fo
 
 ### Configuration
 
-Everything is driven by the root `.env` (see `.env.example`): `PAPER_MODE`, wallet keys (`POLYMARKET_FUNDER`/`SIGNER`/`PRIVATE_KEY`), risk limits (`RISK_*`), DH tuning (`DH_SUM_TARGET`, `DH_MIN_DISCOUNT`, `DH_COOLDOWN_SECONDS`, `DH_MIN_SECONDS_REMAINING`), `FEE_RATE`, `MIN_ORDER_SIZE`, `AUTO_REDEEM`. Each bot process keeps positions in memory; multi-instance deployment requires isolating port/.env/logs/frontend DB per instance — see `deploy/README.md` and `deploy/instances/`.
+Everything is driven by the root `.env` (see `.env.example`): `PAPER_MODE`, `LIH_ENABLED`, wallet keys (`POLYMARKET_FUNDER`/`SIGNER`/`PRIVATE_KEY`), risk limits (`RISK_*`), LIH tuning (`LIH_LEG1_MAX_PRICE`, `LIH_TARGET_COMBINED`, …), market toggles (`DH_ENABLE_*`, shared by LIH), `FEE_RATE`, `MIN_ORDER_SIZE`, `AUTO_REDEEM`. Each bot process keeps positions in memory; multi-instance deployment requires isolating port/.env/logs/frontend DB per instance — see `deploy/README.md` and `deploy/instances/`.
 
 ## Docs
 
