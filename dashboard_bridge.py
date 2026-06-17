@@ -44,6 +44,26 @@ clients = set()
 latest_data = "{}"
 _core_ready_printed = False
 _WALLET_PERSIST_KEYS = ("realWalletBalance", "cashBalance", "positionsValue", "walletSource")
+_SHADOW_LOG_PATH = Path(os.getenv("BRIDGE_LOG_PATH", "logs/bridge.log"))
+_telemetry_log_flush_idx = 0
+
+
+def _flush_new_shadow_lines(obj: dict) -> None:
+    """Append new [LIVE LIH SHADOW] telemetry lines to bridge.log for prelive scans."""
+    global _telemetry_log_flush_idx
+    tlog = obj.get("telemetryLog")
+    if not isinstance(tlog, list):
+        return
+    start = min(_telemetry_log_flush_idx, len(tlog))
+    try:
+        with _SHADOW_LOG_PATH.open("a", encoding="utf-8") as f:
+            for entry in tlog[start:]:
+                text = str(entry)
+                if "LIVE LIH SHADOW" in text:
+                    f.write(text + "\n")
+    except OSError:
+        pass
+    _telemetry_log_flush_idx = len(tlog)
 
 
 def _persist_wallet_fields(incoming: dict, previous: dict) -> None:
@@ -493,6 +513,12 @@ def run_core():
     for line in process.stdout:
         line = line.strip()
         if line.startswith("{") and line.endswith("}"):
+            try:
+                incoming = json.loads(line)
+                if isinstance(incoming, dict):
+                    _flush_new_shadow_lines(incoming)
+            except json.JSONDecodeError:
+                pass
             line = _merge_core_telemetry(line)
             latest_data = line
             _maybe_print_core_ready(line)

@@ -11,6 +11,7 @@
 #include <boost/beast/version.hpp>
 #include <spdlog/spdlog.h>
 #include <fmt/core.h>
+#include <iostream>
 #include <chrono>
 #include <random>
 #include <cmath>
@@ -1321,10 +1322,14 @@ bool OrderRouter::submit_lih_action(const trading::LegInAction& act, double now_
     const char* side_label = act.buy_yes ? "YES" : "NO";
 
     auto shadow = [&](const char* tag, const std::string& detail) {
-        spdlog::info("[LIVE LIH SHADOW] {} {} {}m | {} | dry_run — no order sent",
-                     tag, act.market.asset, act.market.window_minutes, detail);
-        store_.push_telemetry(fmt::format("[LIH SHADOW] {} {} | {}", tag, act.market.asset, detail));
-        store_.push_signal(fmt::format("LIH SHADOW {} {} | {}", tag, act.market.asset, detail));
+        const std::string line = fmt::format(
+            "[LIVE LIH SHADOW] {} {} {}m | {} | dry_run — no order sent",
+            tag, act.market.asset, act.market.window_minutes, detail);
+        spdlog::info("{}", line);
+        store_.push_telemetry(line);
+        store_.push_signal(line);
+        // Plain stdout → bridge captures as [CORE INFO] in logs/bridge.log (prelive scan).
+        std::cout << line << std::endl;
     };
 
     switch (act.kind) {
