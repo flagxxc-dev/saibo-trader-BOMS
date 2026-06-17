@@ -30,7 +30,7 @@ def main():
             print(f"Upload {local.name}")
             sftp.put(str(local), remote)
         sftp.close()
-        run_out(c, f"cd '{PROJ}' && ./build.sh", timeout=1800)
+        run_out(c, f"cd '{PROJ}' && ./build.sh", t=1800)
         run_out(c, f"sed -i 's/^#POLYMARKET_PRIVATE_KEY=/POLYMARKET_PRIVATE_KEY=/' '{PROJ}/.env'")
         run(c, f"bash '{PROJ}/server_start_bot.sh'", timeout=120)
         time.sleep(12)
