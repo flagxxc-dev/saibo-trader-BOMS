@@ -630,6 +630,10 @@ static void apply_runtime_config(
                 } else if (k == "LIH_MIN_BALANCE_USDC") {
                     risk_manager.set_lih_min_balance_usdc(std::stod(v));
                     store.push_telemetry(fmt::format("CONFIG LIH_MIN_BALANCE_USDC={}", v));
+                } else if (k == "LIH_PAUSE_AFTER_ROUND") {
+                    const bool enabled = parse_config_bool(v);
+                    risk_manager.set_lih_pause_after_round(enabled);
+                    store.push_telemetry(fmt::format("CONFIG LIH_PAUSE_AFTER_ROUND={}", enabled ? "true" : "false"));
                 } else if (k == "LIH_LEG1_MAX_PRICE") {
                     const double x = std::stod(v);
                     store.set_lih_config(x, store.lih_target_combined(), store.lih_use_mirror());

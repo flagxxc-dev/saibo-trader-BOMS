@@ -428,7 +428,7 @@ def _wallet_sync_loop() -> None:
 
 
 def _live_maintenance_loop() -> None:
-    """Prune expired LIH rows from disk and ask core to reload (live only)."""
+    """Prune expired LIH rows from disk; chain reconcile only in real live (not shadow)."""
     while True:
         time.sleep(60)
         if os.getenv("PAPER_MODE", "true").lower() in ("false", "0", "no", "off"):
@@ -439,6 +439,14 @@ def _live_maintenance_loop() -> None:
                     timeout=30,
                     check=False,
                 )
+                live_dry = os.getenv("LIVE_LIH_DRY_RUN", "true").lower() not in (
+                    "false",
+                    "0",
+                    "no",
+                    "off",
+                )
+                if live_dry:
+                    continue
                 subprocess.run(
                     [sys.executable, "scripts/live_lih_reconcile.py"],
                     cwd=os.getcwd(),
