@@ -556,8 +556,11 @@ static void apply_runtime_config(
                 store.push_telemetry("CONFIG RESET_KILL | kill switch cleared");
             }
         } else if (action == "reload_lih_state") {
-            if (!g_live_state_reload_path.empty() &&
-                persistence::load_live_lih_state(risk_manager, g_live_state_reload_path)) {
+            if (store.live_lih_dry_run()) {
+                store.push_telemetry("CONFIG reload_lih_state skipped | shadow mode");
+                spdlog::info("reload_lih_state skipped in shadow mode");
+            } else if (!g_live_state_reload_path.empty() &&
+                persistence::load_live_lih_state(risk_manager, g_live_state_reload_path, false)) {
                 store.push_telemetry("CONFIG reload_lih_state | live LIH snapshot reloaded");
             }
         } else if (action == "reset_lih_session") {
@@ -1027,8 +1030,10 @@ int main() {
                 spdlog::info("Paper state: fresh session (no snapshot at {})", paper_state_path);
             }
         } else if (!paper_mode && lih_enabled && live_state_persist) {
-            if (persistence::load_live_lih_state(risk_manager, live_state_path)) {
-                spdlog::info("Live LIH state loaded from {}", live_state_path);
+            if (persistence::load_live_lih_state(risk_manager, live_state_path, live_lih_dry_run)) {
+                if (!live_lih_dry_run) {
+                    spdlog::info("Live LIH state loaded from {}", live_state_path);
+                }
             } else {
                 spdlog::info("Live LIH state: fresh session (no snapshot at {})", live_state_path);
             }
@@ -1116,7 +1121,7 @@ int main() {
             if (!paper_mode) {
                 const bool ok = router.submit_lih_action(act, now_sec);
                 if (ok && lih_enabled && live_state_persist) {
-                    persistence::save_live_lih_state(risk_manager, live_state_path);
+                    persistence::save_live_lih_state(risk_manager, live_state_path, live_lih_dry_run);
                 }
                 return;
             }
@@ -1483,7 +1488,7 @@ int main() {
                     if (!live_lih_dry_run) {
                         const int pending_resolved = router.poll_lih_pending_fills(now_sec_loop);
                         if (pending_resolved > 0 && live_state_persist) {
-                            persistence::save_live_lih_state(risk_manager, live_state_path);
+                            persistence::save_live_lih_state(risk_manager, live_state_path, live_lih_dry_run);
                         }
                     }
                 }
@@ -1496,7 +1501,7 @@ int main() {
             }
             if (!paper_mode && lih_enabled && live_state_persist && loop_start - last_live_save > std::chrono::seconds(10)) {
                 last_live_save = loop_start;
-                persistence::save_live_lih_state(risk_manager, live_state_path);
+                persistence::save_live_lih_state(risk_manager, live_state_path, live_lih_dry_run);
             }
             std::cout << store.get_dashboard_json() << std::endl; // → dashboard_bridge stdout
             std::this_thread::sleep_for(std::chrono::milliseconds(250));

@@ -659,6 +659,17 @@ void RiskManager::reset_lih_session() {
     spdlog::info("LIH session reset | legs_used=0");
 }
 
+void RiskManager::clear_open_lih_positions() {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    const size_t n = open_lih_positions_.size();
+    open_lih_positions_.clear();
+    lih_leg1_inflight_.clear();
+    lih_rebalance_inflight_.clear();
+    if (n > 0) {
+        spdlog::info("Cleared {} open LIH position(s) from memory", n);
+    }
+}
+
 void RiskManager::set_lih_pause_after_round(bool v) {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
     lih_pause_after_round_ = v;

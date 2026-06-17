@@ -25,9 +25,20 @@ def main() -> int:
 
     ok = True
     try:
+        uploads = [
+            (ROOT / "trading-core/src/main.cpp", f"{PROJ}/trading-core/src/main.cpp"),
+            (ROOT / "trading-core/src/exec/OrderRouter.cpp", f"{PROJ}/trading-core/src/exec/OrderRouter.cpp"),
+            (ROOT / "trading-core/src/risk/RiskManager.cpp", f"{PROJ}/trading-core/src/risk/RiskManager.cpp"),
+            (ROOT / "trading-core/src/risk/RiskManager.h", f"{PROJ}/trading-core/src/risk/RiskManager.h"),
+            (ROOT / "trading-core/src/state/PaperStateStore.cpp", f"{PROJ}/trading-core/src/state/PaperStateStore.cpp"),
+            (ROOT / "trading-core/src/state/PaperStateStore.h", f"{PROJ}/trading-core/src/state/PaperStateStore.h"),
+            (ROOT / "trading-core/src/state/StateStore.cpp", f"{PROJ}/trading-core/src/state/StateStore.cpp"),
+            (ROOT / "dashboard_bridge.py", f"{PROJ}/dashboard_bridge.py"),
+        ]
         sftp = client.open_sftp()
-        sftp.put(str(ROOT / "trading-core/src/main.cpp"), f"{PROJ}/trading-core/src/main.cpp")
-        sftp.put(str(ROOT / "dashboard_bridge.py"), f"{PROJ}/dashboard_bridge.py")
+        for local, remote in uploads:
+            print(f"Upload {local.name} -> {remote}")
+            sftp.put(str(local), remote)
         sftp.close()
 
         run_out(client, f"cd '{PROJ}' && ./build.sh", timeout=1800)

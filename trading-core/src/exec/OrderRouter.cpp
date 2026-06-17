@@ -1366,7 +1366,7 @@ bool OrderRouter::submit_lih_action(const trading::LegInAction& act, double now_
         const std::string detail = fmt::format("{} {:.2f}sh @ {:.4f} ({})", side_label, shares, exec_px, act.note);
         if (live_lih_dry_run_) {
             risk_manager_.register_lih_open_leg1(
-                act.market, act.buy_yes, exec_px, shares, now_sec, false, false);
+                act.market, act.buy_yes, exec_px, shares, now_sec, true, false);
             shadow("LEG1", detail);
             return true;
         }
@@ -1472,7 +1472,7 @@ bool OrderRouter::submit_lih_action(const trading::LegInAction& act, double now_
                              tag, act.lih_id);
                 return false;
             }
-            risk_manager_.register_lih_add_leg(act.lih_id, act.buy_yes, exec_px, shares, false, false);
+            risk_manager_.register_lih_add_leg(act.lih_id, act.buy_yes, exec_px, shares, true, false);
             shadow(tag, detail);
             return true;
         }
@@ -1568,7 +1568,7 @@ bool OrderRouter::submit_lih_action(const trading::LegInAction& act, double now_
                              tag, act.lih_id);
                 return false;
             }
-            risk_manager_.register_lih_add_paired(act.lih_id, exec_yes, exec_no, shares, false, false);
+            risk_manager_.register_lih_add_paired(act.lih_id, exec_yes, exec_no, shares, true, false);
             shadow(tag, detail);
             return true;
         }

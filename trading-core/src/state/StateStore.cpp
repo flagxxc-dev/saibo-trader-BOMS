@@ -634,7 +634,8 @@ std::string StateStore::get_dashboard_json() const {
             po["entryPrice"] = yes_avg + no_avg;
             po["size"] = matched > 0 ? matched : std::max(p.yes_shares, p.no_shares);
             po["cost"] = p.yes_cost + p.no_cost;
-            po["strategy"] = "LIH";
+            po["strategy"] = live_lih_dry_run_ ? "LIH-SHADOW" : "LIH";
+            po["isShadow"] = live_lih_dry_run_;
             po["windowMinutes"] = p.window_minutes;
             po["question"] = p.market_question.c_str();
             po["endDateTs"] = p.end_date_ts;

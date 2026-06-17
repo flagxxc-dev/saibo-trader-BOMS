@@ -183,6 +183,9 @@ public:
     int get_lih_session_max_legs() const;
     int get_lih_session_legs_used() const;
     void reset_lih_session();
+
+    /** Drop all in-memory open LIH rounds (shadow reset / bad reconcile cleanup). */
+    void clear_open_lih_positions();
     void set_lih_pause_after_round(bool v);
     bool get_lih_pause_after_round() const;
     /** Minimum wallet USDC before opening a new LIH leg1 (0 = off). */

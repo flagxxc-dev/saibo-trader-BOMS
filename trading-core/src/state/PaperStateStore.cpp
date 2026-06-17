@@ -58,9 +58,12 @@ bool load_paper_state(risk::RiskManager& rm, const std::string& path) {
     }
 }
 
-bool save_live_lih_state(const risk::RiskManager& rm, const std::string& path) {
+bool save_live_lih_state(const risk::RiskManager& rm, const std::string& path, bool shadow_mode) {
     try {
         auto doc = rm.export_live_lih_state();
+        if (shadow_mode) {
+            doc["open_lih_positions"] = boost::json::object{};
+        }
         std::string json = boost::json::serialize(doc);
 
         fs::path p(path);
@@ -85,7 +88,7 @@ bool save_live_lih_state(const risk::RiskManager& rm, const std::string& path) {
     }
 }
 
-bool load_live_lih_state(risk::RiskManager& rm, const std::string& path) {
+bool load_live_lih_state(risk::RiskManager& rm, const std::string& path, bool shadow_mode) {
     try {
         if (!fs::exists(path)) return false;
 
@@ -100,7 +103,12 @@ bool load_live_lih_state(risk::RiskManager& rm, const std::string& path) {
 
         if (!rm.import_live_lih_state(jv.as_object())) return false;
 
-        spdlog::info("Live LIH state restored from {}", path);
+        if (shadow_mode) {
+            rm.clear_open_lih_positions();
+            spdlog::info("Shadow mode: open LIH rows not restored from disk (simulation only)");
+        } else {
+            spdlog::info("Live LIH state restored from {}", path);
+        }
         return true;
     } catch (const std::exception& e) {
         spdlog::warn("Live LIH state load failed ({}): {}", path, e.what());
