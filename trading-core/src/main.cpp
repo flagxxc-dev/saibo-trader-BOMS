@@ -214,28 +214,94 @@ static int env_int(const std::unordered_map<std::string, std::string>& env, cons
     }
 }
 
+// All popen("python …") helpers must use project .venv — system python3 lacks web3/dotenv/clob.
+static std::string g_python_bin;
+
+static void init_python_bin(const std::unordered_map<std::string, std::string>& env) {
+    if (env.count("VENV_PYTHON") && !env.at("VENV_PYTHON").empty()) {
+        g_python_bin = env.at("VENV_PYTHON");
+    } else {
+#ifdef _WIN32
+        g_python_bin = ".venv\\Scripts\\python.exe";
+#else
+        g_python_bin = ".venv/bin/python3";
+#endif
+    }
+    if (!std::filesystem::exists(g_python_bin)) {
+        spdlog::warn("Python bin not found at {} — falling back to PATH python", g_python_bin);
+#ifdef _WIN32
+        g_python_bin = "python";
+#else
+        g_python_bin = "python3";
+#endif
+    } else {
+        spdlog::info("Python helper bin: {}", g_python_bin);
+    }
+}
+
+static std::string python_script_cmd(const std::string& script, const std::string& script_args = "",
+                                     bool merge_stderr = true) {
+    std::string cmd = g_python_bin + " " + script;
+    if (!script_args.empty()) cmd += " " + script_args;
+#ifndef _WIN32
+    cmd += merge_stderr ? " 2>&1" : " 2>/dev/null";
+#endif
+    return cmd;
+}
+
+static std::string popen_read_first_line(const std::string& cmd) {
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    char buf[512];
+    std::string out;
+    if (fgets(buf, sizeof(buf), pipe)) out = buf;
+    pclose(pipe);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    return out;
+}
+
+static std::string popen_read_all(const std::string& cmd) {
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    std::string output;
+    char buf[512];
+    while (fgets(buf, sizeof(buf), pipe)) output += buf;
+    pclose(pipe);
+    while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
+    return output;
+}
+
+static bool verify_venv_web3() {
+    const std::string out = popen_read_first_line(python_script_cmd(
+        "-c",
+        "\"import web3; "
+        "from web3.middleware import ExtraDataToPOAMiddleware; "
+        "print('ok')\""));
+    if (out == "ok") {
+        spdlog::info("venv web3 OK ({})", g_python_bin);
+        return true;
+    }
+    spdlog::critical(
+        "venv web3 MISSING ({}) — output: {} | fix: .venv/bin/pip install 'web3>=6,<8'",
+        g_python_bin, out.empty() ? "(empty)" : out);
+    return false;
+}
+
 // --- 4. 实盘余额同步：调用 fetch_balance.py 刷新 RiskManager 当前余额 ---
 static void sync_live_balance(risk::RiskManager& risk_manager) {
-#ifdef _WIN32
-    FILE* pipe = popen("python fetch_balance.py", "r");
-#else
-    FILE* pipe = popen("python3 fetch_balance.py 2>/dev/null", "r");
-#endif
-    if (!pipe) return;
-    char buf[128];
-    if (fgets(buf, sizeof(buf), pipe)) {
-        try {
-            double new_bal = std::stod(std::string(buf));
-            if (new_bal > 0) risk_manager.update_balance(new_bal);
-        } catch (...) {}
-    }
-    pclose(pipe);
+    const std::string out = popen_read_first_line(python_script_cmd("fetch_balance.py", "", false));
+    if (out.empty()) return;
+    try {
+        double new_bal = std::stod(out);
+        if (new_bal > 0) risk_manager.update_balance(new_bal);
+    } catch (...) {}
 }
 
 // --- 5. 到期自动赎回：后台线程调用 redeem_positions.py 把已结算仓位换回 USDC ---
 static void attempt_onchain_redeem_async(
     const std::string& condition_id,
     const std::string& dh_id,
+    bool neg_risk,
     StateStore& store,
     risk::RiskManager& risk_manager
 ) {
@@ -250,27 +316,23 @@ static void attempt_onchain_redeem_async(
         g_redeem_triggered.insert(condition_id);
     }
 
-    std::thread([condition_id, dh_id, &store, &risk_manager]() {
+    std::thread([condition_id, dh_id, neg_risk, &store, &risk_manager]() {
         spdlog::info("AUTO-REDEEM starting | {} | condition {}", dh_id, condition_id.substr(0, 18));
         store.push_telemetry(fmt::format("REDEEM START {} | {}", dh_id, condition_id.substr(0, 18)));
 
-#ifdef _WIN32
-        std::string cmd = "python redeem_positions.py \"" + condition_id + "\"";
-#else
-        std::string cmd = "python3 redeem_positions.py \"" + condition_id + "\" 2>/dev/null";
-#endif
-        FILE* pipe = popen(cmd.c_str(), "r");
-        if (!pipe) {
-            spdlog::error("AUTO-REDEEM popen failed for {}", dh_id);
+        const std::string neg_flag = neg_risk ? "true" : "false";
+        const std::string cmd = python_script_cmd(
+            "redeem_positions.py",
+            "\"" + condition_id + "\" " + neg_flag);
+        const std::string output = popen_read_all(cmd);
+        if (output.empty()) {
+            spdlog::error("AUTO-REDEEM popen failed for {} | cmd={}", dh_id, cmd);
+            {
+                std::lock_guard<std::mutex> lock(g_redeem_mutex);
+                g_redeem_triggered.erase(condition_id);
+            }
             return;
         }
-
-        std::string output;
-        char buf[512];
-        while (fgets(buf, sizeof(buf), pipe)) {
-            output += buf;
-        }
-        pclose(pipe);
 
         try {
             auto jv = boost::json::parse(output);
@@ -285,11 +347,19 @@ static void attempt_onchain_redeem_async(
                 store.push_telemetry(fmt::format("REDEEM OK {} | tx {}", dh_id, tx.empty() ? "n/a" : tx.substr(0, 18)));
                 sync_live_balance(risk_manager);
             } else {
-                spdlog::critical("AUTO-REDEEM FAILED | {} | {}", dh_id, msg);
+                spdlog::warn("AUTO-REDEEM skipped/failed | {} | {}", dh_id, msg);
                 store.push_telemetry(fmt::format("REDEEM FAIL {} | {}", dh_id, msg));
+                {
+                    std::lock_guard<std::mutex> lock(g_redeem_mutex);
+                    g_redeem_triggered.erase(condition_id);
+                }
             }
         } catch (const std::exception& e) {
             spdlog::error("AUTO-REDEEM parse error | {} | raw: {}", dh_id, output.substr(0, 200));
+            {
+                std::lock_guard<std::mutex> lock(g_redeem_mutex);
+                g_redeem_triggered.erase(condition_id);
+            }
         }
     }).detach();
 }
@@ -405,7 +475,9 @@ void check_and_close_lih_positions(
         if (now < p.end_date_ts) continue;
 
         const double matched = std::min(p.yes_shares, p.no_shares);
-        const bool fully_hedged = matched > 0 && std::abs(p.yes_shares - p.no_shares) < 1e-6;
+        const double gap = std::abs(p.yes_shares - p.no_shares);
+        // Hedge leg may differ slightly in size (e.g. 10.15 vs 10.00); still treat as hedged.
+        const bool fully_hedged = matched >= 1.0 && gap <= 0.5;
 
         auto prices = try_binary_settlement_prices(
             gamma, store, p.condition_id, p.yes_token_id, p.no_token_id, "LIH " + p.asset);
@@ -441,7 +513,7 @@ void check_and_close_lih_positions(
                 p.asset, held, p.yes_shares, p.no_shares, ey, en));
         }
         if (is_live && auto_redeem_enabled && !condition_id.empty()) {
-            attempt_onchain_redeem_async(condition_id, id, store, risk_manager);
+            attempt_onchain_redeem_async(condition_id, id, p.is_neg_risk, store, risk_manager);
         }
     }
 }
@@ -469,7 +541,7 @@ void check_and_close_dh_positions(
             p.asset, ey, en, p.market_question));
 
         if (is_live && auto_redeem_enabled && !p.condition_id.empty()) {
-            attempt_onchain_redeem_async(p.condition_id, id, store, risk_manager);
+            attempt_onchain_redeem_async(p.condition_id, id, p.is_neg_risk, store, risk_manager);
         } else if (is_live && p.condition_id.empty()) {
             spdlog::warn("Live DH {} closed without condition_id — cannot auto-redeem", id);
         }
@@ -762,13 +834,16 @@ int main() {
         spdlog::set_level(spdlog::level::debug);
         spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
 
-        // --- B. 读取 .env：纸面/实盘模式、Polymarket 钱包、起始余额 ---
+        // --- B. 读取 .env：实盘模式、Polymarket 钱包、起始余额 ---
         auto env = load_env(".env");
-        bool paper_mode = true;
+        init_python_bin(env);
+        bool paper_mode = false;
         if (env.count("PAPER_MODE")) {
             std::string pm = env["PAPER_MODE"];
             std::transform(pm.begin(), pm.end(), pm.begin(), ::tolower);
-            if (pm == "false" || pm == "0") paper_mode = false;
+            if (pm == "true" || pm == "1") {
+                spdlog::warn("PAPER_MODE=true is ignored — this build runs LIVE only");
+            }
         }
         
         std::string polymarket_host = env.count("POLYMARKET_HOST") ? env["POLYMARKET_HOST"] : "https://clob.polymarket.com";
@@ -780,53 +855,40 @@ int main() {
         if (polymarket_signer.empty() && !polymarket_funder.empty()) polymarket_signer = polymarket_funder;
         if (polymarket_funder.empty() && !polymarket_signer.empty()) polymarket_funder = polymarket_signer;
 
-        double starting_balance = 1000.0;
-        if (paper_mode && env.count("PAPER_STARTING_BALANCE")) {
-            starting_balance = std::stod(env["PAPER_STARTING_BALANCE"]);
-        } else if (!paper_mode) {
-            // 实盘：优先 fetch_balance.py（链上 pUSD + 持仓），失败则 RPC 直查
-            starting_balance = 0.0;
-            spdlog::info("Fetching Polymarket balance via SDK...");
-#ifdef _WIN32
-            FILE* pipe = popen("python fetch_balance.py", "r");
-#else
-            FILE* pipe = popen("python3 fetch_balance.py 2>/dev/null", "r");
-#endif
-            if (pipe) {
-                char buf[128];
-                if (fgets(buf, sizeof(buf), pipe)) {
-                    try {
-                        starting_balance = std::stod(std::string(buf));
-                        spdlog::info("Detected Polymarket balance: ${:.2f}", starting_balance);
-                    } catch (...) {
-                        spdlog::warn("Could not parse balance output: {}", buf);
-                    }
-                }
-                pclose(pipe);
+        double starting_balance = 0.0;
+        if (!verify_venv_web3()) {
+            spdlog::critical("[FATAL] Live mode requires web3 in project .venv (see log above)");
+            return 1;
+        }
+        spdlog::info("Fetching Polymarket balance via SDK...");
+        const std::string bal_out = popen_read_first_line(
+            python_script_cmd("fetch_balance.py", "", false));
+        if (!bal_out.empty()) {
+            try {
+                starting_balance = std::stod(bal_out);
+                spdlog::info("Detected Polymarket balance: ${:.2f}", starting_balance);
+            } catch (...) {
+                spdlog::warn("Could not parse balance output: {}", bal_out);
             }
-            if (starting_balance <= 0) {
-                spdlog::info("SDK returned $0.00, falling back to on-chain RPC for funder address...");
-                starting_balance = fetch_usdc_balance(polymarket_funder);
-            }
-            if (starting_balance <= 0) {
-                spdlog::warn("Polymarket balance is $0.00. Deposit pUSD/USDC to the proxy wallet to trade.");
-            }
+        }
+        if (starting_balance <= 0) {
+            spdlog::info("SDK returned $0.00, falling back to on-chain RPC for funder address...");
+            starting_balance = fetch_usdc_balance(polymarket_funder);
+        }
+        if (starting_balance <= 0) {
+            spdlog::warn("Polymarket balance is $0.00. Deposit pUSD/USDC to the proxy wallet to trade.");
         }
 
         std::string polymarket_pk = env.count("POLYMARKET_PRIVATE_KEY") ? env["POLYMARKET_PRIVATE_KEY"] : "";
-        if (!paper_mode) {
-            if (polymarket_pk.empty() ||
-                polymarket_pk == "0x0000000000000000000000000000000000000000000000000000000000000001" ||
-                polymarket_pk == "0xYourWalletPrivateKey") {
-                spdlog::critical("[FATAL] Live mode requires a valid POLYMARKET_PRIVATE_KEY in .env");
-                return 1;
-            }
-            if (polymarket_funder.empty() || polymarket_funder == "0xYourPolygonWalletAddress") {
-                spdlog::critical("[FATAL] Live mode requires POLYMARKET_FUNDER in .env");
-                return 1;
-            }
-        } else if (polymarket_pk.empty()) {
-            polymarket_pk = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        if (polymarket_pk.empty() ||
+            polymarket_pk == "0x0000000000000000000000000000000000000000000000000000000000000001" ||
+            polymarket_pk == "0xYourWalletPrivateKey") {
+            spdlog::critical("[FATAL] Live mode requires a valid POLYMARKET_PRIVATE_KEY in .env");
+            return 1;
+        }
+        if (polymarket_funder.empty() || polymarket_funder == "0xYourPolygonWalletAddress") {
+            spdlog::critical("[FATAL] Live mode requires POLYMARKET_FUNDER in .env");
+            return 1;
         }
         // --- C. EIP-712 签名合约：标准 V2 与 NegRisk（5m/15m Up-Down 用后者）---
         // V2 Exchange addresses (April 2026 migration)
@@ -1021,30 +1083,12 @@ int main() {
                          starting_balance, lih_min_balance_usdc);
         }
 
-        // --- K. 状态持久化：纸面 paper_state.json / 实盘 live_state.json ---
-        bool paper_state_persist = true;
-        if (env.count("PAPER_STATE_PERSIST")) {
-            std::string ps = env["PAPER_STATE_PERSIST"];
-            std::transform(ps.begin(), ps.end(), ps.begin(), ::tolower);
-            paper_state_persist = !(ps == "false" || ps == "0" || ps == "no" || ps == "off");
-        }
-        std::string paper_state_path = env.count("PAPER_STATE_PATH") ? env["PAPER_STATE_PATH"] : "logs/paper_state.json";
+        // --- K. 状态持久化：实盘 live_state.json ---
         std::string live_state_path = env.count("LIVE_STATE_PATH") ? env["LIVE_STATE_PATH"] : "logs/live_state.json";
         g_live_state_reload_path = live_state_path;
         bool live_state_persist = env_flag_true(env, "LIVE_STATE_PERSIST", true);
 
-        if (paper_mode && paper_state_persist) {
-            if (persistence::load_paper_state(risk_manager, paper_state_path)) {
-                risk_manager.reconcile_paper_balance(true);
-                spdlog::info("Paper session resumed | Balance: ${:.2f} | Open: {} | DH trades: {}",
-                    risk_manager.get_current_balance(),
-                    risk_manager.get_open_position_count(),
-                    risk_manager.get_total_dh_trades());
-                store.push_telemetry(fmt::format("PAPER STATE RESTORED | ${:.2f}", risk_manager.get_current_balance()));
-            } else {
-                spdlog::info("Paper state: fresh session (no snapshot at {})", paper_state_path);
-            }
-        } else if (!paper_mode && lih_enabled && live_state_persist) {
+        if (lih_enabled && live_state_persist) {
             if (persistence::load_live_lih_state(risk_manager, live_state_path, live_lih_dry_run)) {
                 if (!live_lih_dry_run) {
                     spdlog::info("Live LIH state loaded from {}", live_state_path);
@@ -1052,6 +1096,7 @@ int main() {
             } else {
                 spdlog::info("Live LIH state: fresh session (no snapshot at {})", live_state_path);
             }
+            risk_manager.purge_paper_positions();
         }
         int legacy_la = risk_manager.close_legacy_la_positions();
         if (legacy_la > 0) {
@@ -1398,23 +1443,13 @@ int main() {
         std::thread balance_thread([&, wallet_sync_interval_sec]() {
             while (true) {
                 if (!paper_mode) {
-#ifdef _WIN32
-                    FILE* pipe = popen("python fetch_balance.py", "r");
-#else
-                    // Must use project venv — system python3 lacks dotenv/py_clob_client.
-                    FILE* pipe = popen(".venv/bin/python3 fetch_balance.py 2>/dev/null", "r");
-#endif
-                    if (pipe) {
-                        char buf[128];
-                        if (fgets(buf, sizeof(buf), pipe)) {
-                            try {
-                                double new_bal = std::stod(std::string(buf));
-                                if (new_bal > 0) {
-                                    risk_manager.update_balance(new_bal);
-                                }
-                            } catch (...) {}
-                        }
-                        pclose(pipe);
+                    const std::string bal_out = popen_read_first_line(
+                        python_script_cmd("fetch_balance.py", "", false));
+                    if (!bal_out.empty()) {
+                        try {
+                            double new_bal = std::stod(bal_out);
+                            if (new_bal > 0) risk_manager.update_balance(new_bal);
+                        } catch (...) {}
                     }
                 }
                 std::this_thread::sleep_for(std::chrono::seconds(wallet_sync_interval_sec));
@@ -1446,7 +1481,6 @@ int main() {
 
         auto last_binance_rest = std::chrono::system_clock::now() - std::chrono::seconds(10);
         bool rest_fallback_logged = false;
-        auto last_paper_save = std::chrono::system_clock::now();
         auto last_live_save = std::chrono::system_clock::now();
         auto last_rest_book_poll = std::chrono::system_clock::now() - std::chrono::seconds(5);
         std::atomic<bool> rest_book_refreshing{false};
@@ -1494,26 +1528,20 @@ int main() {
             apply_runtime_config("logs/runtime_config.json", risk_manager, store, detector_mutex, dh_detector, lih_detector);
             check_and_close_dh_positions(risk_manager, store, gamma, auto_redeem);
             if (lih_enabled) {
-                if (paper_mode) store.reload_live_mirror(); // 纸面读 mirror 定价
                 const double now_sec_loop = std::chrono::duration<double>(
                     std::chrono::system_clock::now().time_since_epoch()).count();
-                if (!paper_mode) {
-                    risk_manager.purge_expired_lih_open(now_sec_loop, 30.0);
-                    if (!live_lih_dry_run) {
-                        const int pending_resolved = router.poll_lih_pending_fills(now_sec_loop);
-                        if (pending_resolved > 0 && live_state_persist) {
-                            persistence::save_live_lih_state(risk_manager, live_state_path, false);
-                        }
+                risk_manager.purge_expired_lih_open(now_sec_loop, 30.0);
+                if (!live_lih_dry_run) {
+                    const int pending_resolved = router.poll_lih_pending_fills(now_sec_loop);
+                    if (pending_resolved > 0 && live_state_persist) {
+                        persistence::save_live_lih_state(risk_manager, live_state_path, false);
                     }
                 }
+                risk_manager.scrub_lih_inflight_locks(now_sec_loop);
                 check_and_close_lih_positions(risk_manager, store, gamma, auto_redeem);
                 try_lih_evaluate(); // 主循环也跑 LIH（不依赖 tick）
             }
-            if (paper_mode && paper_state_persist && loop_start - last_paper_save > std::chrono::seconds(10)) {
-                last_paper_save = loop_start;
-                persistence::save_paper_state(risk_manager, paper_state_path);
-            }
-            if (!paper_mode && lih_enabled && live_state_persist && !live_lih_dry_run
+            if (lih_enabled && live_state_persist && !live_lih_dry_run
                 && loop_start - last_live_save > std::chrono::seconds(10)) {
                 last_live_save = loop_start;
                 persistence::save_live_lih_state(risk_manager, live_state_path, false);

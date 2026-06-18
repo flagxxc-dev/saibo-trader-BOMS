@@ -4,7 +4,6 @@ import { DashboardLayout } from "@/components/layouts/DashboardLayout";
 import { PageContainer } from "@/components/shared/PageContainer";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { GlassCard, CardContent, CardHeader, CardTitle } from "@/components/shared/GlassCard";
-import { BinancePriceChart } from "@/components/dashboard/BinancePriceChart";
 import { PmMarketPanel } from "@/components/dashboard/PmMarketPanel";
 import { TradingPanels } from "@/components/dashboard/TradingPanels";
 import { PreflightBanner } from "@/components/dashboard/PreflightBanner";
@@ -31,7 +30,11 @@ export default function DashboardPage() {
     setMounted(true);
   }, []);
 
-  const pnlColor = liveState.totalPnl >= 0 ? "text-emerald-400" : "text-red-400";
+  const cumulativePnl =
+    (liveState.tradesBaselineTs ?? 0) > 0 && !liveState.isPaperMode
+      ? strategyPnl
+      : liveState.totalPnl;
+  const pnlColor = cumulativePnl >= 0 ? "text-emerald-400" : "text-red-400";
   const coreStatus = coreStatusLabel(liveState.status, liveState.botStreamConnected);
   const hasLiveWallet =
     liveState.walletSource === "live" &&
@@ -85,7 +88,7 @@ export default function DashboardPage() {
                 </p>
               )}
               <p className={`text-xs font-mono mt-2 ${pnlColor}`}>
-                累计盈亏 {liveState.totalPnl >= 0 ? "+" : ""}${liveState.totalPnl.toFixed(2)}
+                累计盈亏 {cumulativePnl >= 0 ? "+" : ""}${cumulativePnl.toFixed(2)}
                 <span className="text-muted-foreground ml-2">
                   今日 {liveState.dailyPnl >= 0 ? "+" : ""}${liveState.dailyPnl.toFixed(2)}
                 </span>
@@ -162,38 +165,27 @@ export default function DashboardPage() {
           {lihMode ? (
             <>
               <strong>LIH 模式</strong> — 先买便宜腿（≤ {liveState.lihLeg1MaxPrice.toFixed(2)}），再 rebalance / 对冲至合价 ≤{" "}
-              {liveState.lihTargetCombined.toFixed(2)}；Binance 走势仅作参考。
+              {liveState.lihTargetCombined.toFixed(2)}。
             </>
           ) : (
             <>
-              <strong>DH 模式</strong> — 开仓看 YES+NO 合价（目标 ≤ {liveState.dhSumTarget.toFixed(2)}）；Binance
-              走势仅作参考，与是否开仓无关。
+              <strong>DH 模式</strong> — 开仓看 YES+NO 合价（目标 ≤ {liveState.dhSumTarget.toFixed(2)}）。
             </>
           )}
         </div>
 
-        <div className="space-y-5">
-          {liveState.binanceFeedEnabled && (
-            <BinancePriceChart
-              btcPrice={liveState.btcPrice}
-              ethPrice={liveState.ethPrice}
-              solPrice={liveState.solPrice}
-              timestamp={liveState.timestamp}
-            />
-          )}
-          <PmMarketPanel
-            opportunities={liveState.dhOpportunities}
-            dhSumTarget={liveState.dhSumTarget}
-            dhMinDiscount={liveState.dhMinDiscount}
-            feeRate={liveState.feeRate}
-            timestamp={liveState.timestamp}
-            marketsScanned={liveState.marketsScanned}
-            lihEnabled={lihMode}
-            lihTargetCombined={liveState.lihTargetCombined}
-          />
-        </div>
-
         <TradingPanels liveState={liveState} />
+
+        <PmMarketPanel
+          opportunities={liveState.dhOpportunities}
+          dhSumTarget={liveState.dhSumTarget}
+          dhMinDiscount={liveState.dhMinDiscount}
+          feeRate={liveState.feeRate}
+          timestamp={liveState.timestamp}
+          marketsScanned={liveState.marketsScanned}
+          lihEnabled={lihMode}
+          lihTargetCombined={liveState.lihTargetCombined}
+        />
       </PageContainer>
     </DashboardLayout>
   );

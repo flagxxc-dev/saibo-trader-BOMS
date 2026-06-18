@@ -35,7 +35,7 @@ def _enabled_assets(prefix: str, assets: tuple[str, ...]) -> str:
 
 def print_config_summary() -> None:
     load_dotenv()
-    paper = _env_bool("PAPER_MODE", True)
+    paper = _env_bool("PAPER_MODE", False)
     lih = _env_bool("LIH_ENABLED", True)
     mode = "纸面 PAPER" if paper else "实盘 LIVE"
     strategy = "LIH 分腿对冲" if lih else "DH 结构对冲（遗留）"
@@ -109,12 +109,12 @@ def run_prelive_step(*, allow_live: bool = False, min_shadow_leg1: int = 0, live
 def maybe_reconcile_live_lih() -> None:
     """Rebuild live LIH memory from chain when real live mode starts (not shadow)."""
     load_dotenv()
-    if _env_bool("PAPER_MODE", True):
+    if _env_bool("PAPER_MODE", False):
         return
     if _env_bool("LIVE_LIH_DRY_RUN", True):
         print("[reconcile] skip — shadow mode (LIVE_LIH_DRY_RUN=true)", file=sys.stderr)
         return
-    if not _env_bool("LIVE_LIH_RECONCILE_ON_START", True):
+    if not _env_bool("LIVE_LIH_RECONCILE_ON_START", False):
         print("[reconcile] skip — LIVE_LIH_RECONCILE_ON_START=false", file=sys.stderr)
         return
     script = Path(__file__).resolve().parent / "scripts" / "live_lih_reconcile.py"
@@ -190,7 +190,7 @@ def main() -> int:
                 pass
 
     load_dotenv()
-    paper = _env_bool("PAPER_MODE", True)
+    paper = _env_bool("PAPER_MODE", False)
     lih = _env_bool("LIH_ENABLED", True)
     live_dry = _env_bool("LIVE_LIH_DRY_RUN", True)
     skip_prelive = args.skip_prelive or _env_bool("START_SKIP_PRELIVE", False)

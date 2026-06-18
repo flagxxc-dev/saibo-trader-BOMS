@@ -48,6 +48,12 @@ LegInHedgeDetector::Quote LegInHedgeDetector::quote_for(const MarketInfo& market
     Quote q;
     auto side_ask = [&](const std::optional<StateStore::DetectionAsk>& det) -> double {
         if (!det) return 0.0;
+        if (store_.book_aware_detect()) {
+            if (det->conservative_ask > kFloatTol) return det->conservative_ask;
+            if (det->rest_ok) return det->rest_book_ask;
+            if (det->ws_ok) return det->ws_book_ask;
+            return 0.0;
+        }
         if (det->rest_ok) return det->rest_book_ask;
         if (det->ws_ok) return det->ws_book_ask;
         return 0.0;
@@ -83,6 +89,28 @@ LegInHedgeDetector::Quote LegInHedgeDetector::quote_for(const MarketInfo& market
     if (yes && yes->side == "BUY") q.yes = yes->price;
     if (no && no->side == "BUY") q.no = no->price;
     return q;
+}
+
+LegInHedgeDetector::Quote LegInHedgeDetector::hedge_quote_for(const MarketInfo& market) const {
+    Quote q;
+    constexpr double kHedgeRestMaxAgeSec = 5.0;
+    auto hedge_side = [&](const std::optional<StateStore::DetectionAsk>& det) -> double {
+        if (!det) return 0.0;
+        if (!store_.is_paper_mode() && !det->rest_ok) return 0.0;
+        if (det->conservative_ask > kFloatTol) return det->conservative_ask;
+        if (det->rest_ok) return det->rest_book_ask;
+        if (store_.is_paper_mode() && det->ws_ok) return det->ws_book_ask;
+        return 0.0;
+    };
+
+    if (store_.book_aware_detect()) {
+        const auto yes_det = store_.get_detection_ask(market.yes_token_id, kHedgeRestMaxAgeSec);
+        const auto no_det = store_.get_detection_ask(market.no_token_id, kHedgeRestMaxAgeSec);
+        q.yes = hedge_side(yes_det);
+        q.no = hedge_side(no_det);
+        if (q.yes > kFloatTol && q.no > kFloatTol) return q;
+    }
+    return quote_for(market);
 }
 
 double LegInHedgeDetector::cap_shares_budget(double shares, double max_usdc, double unit_cost) const {
@@ -179,6 +207,7 @@ void LegInHedgeDetector::log_entry_status(
 
 std::optional<LegInAction> LegInHedgeDetector::evaluate(double now_ms, risk::RiskManager& rm) {
     const double now_sec = now_ms / 1000.0;
+    rm.scrub_lih_inflight_locks(now_sec);
     const double max_leg_usdc = rm.get_max_leg_cost_usdc();
     const double max_matched_cap = rm.get_lih_max_matched_shares();
 
@@ -201,6 +230,13 @@ std::optional<LegInAction> LegInHedgeDetector::evaluate(double now_ms, risk::Ris
             if (blocked) continue;
 
         auto open_lih = rm.find_open_lih_for_market(market);
+        if (!open_lih) {
+            // Only reuse by-asset when same gamma window (avoid hedging wrong tokens).
+            auto sibling = rm.find_open_lih_by_asset(market.asset, market.window_minutes);
+            if (sibling && std::abs(sibling->end_date_ts - market.end_date_ts) < 2.0) {
+                open_lih = sibling;
+            }
+        }
         Quote q = quote_for(market);
         if (q.yes <= kFloatTol || q.no <= kFloatTol) {
             if (!open_lih) log_entry_status(market, key, now_sec, q, "no quote");
@@ -219,7 +255,9 @@ std::optional<LegInAction> LegInHedgeDetector::evaluate(double now_ms, risk::Ris
                 continue;
             }
             if (rm.lih_has_open_or_inflight(market.asset, market.window_minutes)) {
-                log_entry_status(market, key, now_sec, q, "leg1 in-flight");
+                const char* busy = rm.lih_leg1_inflight_only(market.asset, market.window_minutes)
+                    ? "leg1 in-flight" : "slot busy";
+                log_entry_status(market, key, now_sec, q, busy);
                 continue;
             }
             if (rm.lih_other_slot_busy(market.asset, market.window_minutes)) {
@@ -299,11 +337,12 @@ std::optional<LegInAction> LegInHedgeDetector::evaluate(double now_ms, risk::Ris
             }
             log_rebalance_status(market, key, now_sec, pos, q, yes_avg, no_avg, gap);
 
+            const Quote hq = hedge_quote_for(market);
             const bool heavy_yes = pos.yes_shares > pos.no_shares + kFloatTol;
             const bool need_yes = pos.yes_shares < pos.no_shares - kFloatTol;
             const double heavy_avg = heavy_yes ? yes_avg : no_avg;
-            const double heavy_ask = heavy_yes ? q.yes : q.no;
-            const double light_ask = need_yes ? q.yes : q.no;
+            const double heavy_ask = heavy_yes ? hq.yes : hq.no;
+            const double light_ask = need_yes ? hq.yes : hq.no;
             const auto& light_token = need_yes ? market.yes_token_id : market.no_token_id;
             const auto& heavy_token = heavy_yes ? market.yes_token_id : market.no_token_id;
 

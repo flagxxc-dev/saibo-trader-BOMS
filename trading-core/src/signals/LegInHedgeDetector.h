@@ -72,6 +72,8 @@ private:
         const MarketInfo& market, double yes_p, double no_p,
         double max_usdc, double max_matched_shares) const;
     Quote quote_for(const MarketInfo& market) const;
+    /** Live hedge pricing: fresh REST + max(ws,rest) conservative ask. */
+    Quote hedge_quote_for(const MarketInfo& market) const;
     double cap_shares(double shares, double balance, double unit_cost) const;
     void log_rebalance_status(const MarketInfo& market, const std::string& key, double now_sec,
                               const risk::LegInHedgePosition& pos, const Quote& q,

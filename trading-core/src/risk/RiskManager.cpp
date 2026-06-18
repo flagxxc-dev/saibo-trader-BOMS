@@ -3,9 +3,15 @@
 #include <numeric>
 #include <cmath>
 #include <algorithm>
+#include <ctime>
+#include <unordered_map>
 #include <boost/json.hpp>
 
 namespace risk {
+
+namespace {
+constexpr double kFloatTol = 1e-6;
+} // namespace
 
 double RiskManager::now() {
     auto duration = std::chrono::system_clock::now().time_since_epoch();
@@ -115,7 +121,20 @@ double RiskManager::get_starting_balance() const {
 
 int RiskManager::get_open_position_count() const {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
-    return open_positions_.size() + open_dh_positions_.size() + open_lih_positions_.size();
+    int n = 0;
+    for (const auto& [id, p] : open_positions_) {
+        (void)id;
+        if (!p.paper_mode) ++n;
+    }
+    for (const auto& [id, p] : open_dh_positions_) {
+        (void)id;
+        if (!p.paper_mode) ++n;
+    }
+    for (const auto& [id, p] : open_lih_positions_) {
+        (void)id;
+        if (!p.paper_mode && !p.is_shadow) ++n;
+    }
+    return n;
 }
 
 double RiskManager::get_win_rate() const {
@@ -616,22 +635,56 @@ std::string lih_slot_key(const std::string& asset, int window_minutes) {
     std::transform(a.begin(), a.end(), a.begin(), ::tolower);
     return a + "|" + std::to_string(window_minutes);
 }
+
+void drop_lih_leg1_slot(
+    std::unordered_set<std::string>& inflight,
+    std::unordered_map<std::string, double>& since,
+    const std::string& key) {
+    inflight.erase(key);
+    since.erase(key);
+}
+
+constexpr double kLeg1InflightMaxSec = 120.0;
 } // namespace
 
 bool RiskManager::lih_has_open_or_inflight(const std::string& asset, int window_minutes) const {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
     const std::string key = lih_slot_key(asset, window_minutes);
     if (lih_leg1_inflight_.count(key)) return true;
+    std::string want = asset;
+    std::transform(want.begin(), want.end(), want.begin(), ::tolower);
     for (const auto& [id, p] : open_lih_positions_) {
-        if (p.asset == asset && p.window_minutes == window_minutes) return true;
+        (void)id;
+        if (p.asset == want && p.window_minutes == window_minutes && !p.paper_mode && !p.is_shadow) {
+            return true;
+        }
     }
     return false;
+}
+
+bool RiskManager::lih_leg1_inflight_only(const std::string& asset, int window_minutes) const {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    const std::string key = lih_slot_key(asset, window_minutes);
+    if (!lih_leg1_inflight_.count(key)) return false;
+    // Stale inflight after register/hedge — open position means leg1 already landed.
+    std::string want = asset;
+    std::transform(want.begin(), want.end(), want.begin(), ::tolower);
+    for (const auto& [id, p] : open_lih_positions_) {
+        (void)id;
+        if (p.paper_mode || p.is_shadow) continue;
+        std::string have = p.asset;
+        std::transform(have.begin(), have.end(), have.begin(), ::tolower);
+        if (have == want && p.window_minutes == window_minutes) return false;
+    }
+    return true;
 }
 
 bool RiskManager::lih_other_slot_busy_unlocked(const std::string& asset, int window_minutes) const {
     if (!lih_one_slot_global_) return false;
     const std::string key = lih_slot_key(asset, window_minutes);
     for (const auto& [id, p] : open_lih_positions_) {
+        (void)id;
+        if (p.paper_mode || p.is_shadow) continue;
         if (lih_slot_key(p.asset, p.window_minutes) != key) return true;
     }
     for (const auto& inflight_key : lih_leg1_inflight_) {
@@ -683,11 +736,54 @@ void RiskManager::reset_lih_session() {
     spdlog::info("LIH session reset | legs_used=0");
 }
 
+void RiskManager::scrub_lih_inflight_locks(double now_sec) {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    std::unordered_set<std::string> live_slots;
+    for (const auto& [id, p] : open_lih_positions_) {
+        (void)id;
+        if (p.paper_mode || p.is_shadow) continue;
+        live_slots.insert(lih_slot_key(p.asset, p.window_minutes));
+    }
+
+    for (auto it = lih_rebalance_inflight_.begin(); it != lih_rebalance_inflight_.end(); ) {
+        if (!open_lih_positions_.count(*it)) {
+            spdlog::warn("[LIH] scrub stale rebalance lock | {}", *it);
+            it = lih_rebalance_inflight_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto it = lih_leg1_inflight_.begin(); it != lih_leg1_inflight_.end(); ) {
+        const std::string& key = *it;
+        bool drop = live_slots.count(key) > 0;
+        if (!drop) {
+            const auto sit = lih_leg1_inflight_since_.find(key);
+            const double since = sit != lih_leg1_inflight_since_.end() ? sit->second : 0.0;
+            if (since <= 0.0 || now_sec - since >= kLeg1InflightMaxSec) {
+                drop = true;
+            }
+        }
+        if (drop) {
+            if (live_slots.count(key)) {
+                spdlog::debug("[LIH] scrub leg1 inflight tail (position open) | {}", key);
+            } else {
+                spdlog::warn("[LIH] scrub orphan leg1 inflight tail | {}", key);
+            }
+            lih_leg1_inflight_since_.erase(key);
+            it = lih_leg1_inflight_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 void RiskManager::clear_open_lih_positions() {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
     const size_t n = open_lih_positions_.size();
     open_lih_positions_.clear();
     lih_leg1_inflight_.clear();
+    lih_leg1_inflight_since_.clear();
     lih_rebalance_inflight_.clear();
     if (n > 0) {
         spdlog::info("Cleared {} open LIH position(s) from memory", n);
@@ -701,6 +797,218 @@ void RiskManager::clear_closed_lih_positions() {
     if (n > 0) {
         spdlog::info("Cleared {} closed LIH record(s) from memory", n);
     }
+}
+
+void RiskManager::purge_paper_positions() {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    size_t dropped = 0;
+    for (auto it = open_positions_.begin(); it != open_positions_.end(); ) {
+        if (it->second.paper_mode) {
+            it = open_positions_.erase(it);
+            ++dropped;
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = open_dh_positions_.begin(); it != open_dh_positions_.end(); ) {
+        if (it->second.paper_mode) {
+            it = open_dh_positions_.erase(it);
+            ++dropped;
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = open_lih_positions_.begin(); it != open_lih_positions_.end(); ) {
+        if (it->second.paper_mode || it->second.is_shadow) {
+            lih_rebalance_inflight_.erase(it->first);
+            it = open_lih_positions_.erase(it);
+            ++dropped;
+        } else {
+            ++it;
+        }
+    }
+    closed_lih_positions_.erase(
+        std::remove_if(closed_lih_positions_.begin(), closed_lih_positions_.end(),
+                       [](const LegInHedgePosition& p) { return p.paper_mode || p.is_shadow; }),
+        closed_lih_positions_.end());
+    lih_leg1_inflight_.clear();
+    if (dropped > 0) {
+        spdlog::info("Purged {} paper/shadow open position(s) — live-only", dropped);
+    }
+}
+
+namespace {
+constexpr double kLihConsolidateTol = 1e-4;
+constexpr double kLihPairSec = 180.0;
+
+char lih_dominant_side(const LegInHedgePosition& p) {
+    const double matched = std::min(p.yes_shares, p.no_shares);
+    if (matched > kLihConsolidateTol) return 'B';
+    if (p.yes_shares > p.no_shares + kLihConsolidateTol) return 'Y';
+    if (p.no_shares > p.yes_shares + kLihConsolidateTol) return 'N';
+    return ' ';
+}
+
+bool lih_should_pair_closed(const LegInHedgePosition& a, const LegInHedgePosition& b) {
+    const char sa = lih_dominant_side(a);
+    const char sb = lih_dominant_side(b);
+    if (sa == ' ' || sb == ' ') return false;
+    if (sa != sb && sa != 'B' && sb != 'B') return true;
+    // Orphan YES/NO leg + row that already has both sides (split -recon history).
+    if ((sa == 'Y' || sa == 'N') && sb == 'B') return true;
+    if ((sb == 'Y' || sb == 'N') && sa == 'B') return true;
+    return false;
+}
+
+std::string lih_asset_key(const std::string& asset) {
+    std::string a = asset;
+    std::transform(a.begin(), a.end(), a.begin(), ::tolower);
+    return a;
+}
+
+std::string lih_pick_merged_id(const LegInHedgePosition& a, const LegInHedgePosition& b) {
+    for (const auto& p : {a, b}) {
+        if (p.lih_id.find("-recon") == std::string::npos) return p.lih_id;
+    }
+    const auto& first = a.opened_at <= b.opened_at ? a : b;
+    return fmt::format("LIH-{}-{}", lih_asset_key(first.asset),
+                       static_cast<uint64_t>(first.opened_at * 1000.0));
+}
+
+LegInHedgePosition merge_closed_lih_pair(const LegInHedgePosition& a, const LegInHedgePosition& b) {
+    const auto& leg1 = a.opened_at <= b.opened_at ? a : b;
+    const auto& leg2 = a.opened_at <= b.opened_at ? b : a;
+    LegInHedgePosition out;
+    out.lih_id = lih_pick_merged_id(a, b);
+    out.asset = leg1.asset;
+    out.window_minutes = leg1.window_minutes;
+    out.market_question = leg1.market_question;
+    out.yes_token_id = !leg1.yes_token_id.empty() ? leg1.yes_token_id : leg2.yes_token_id;
+    out.no_token_id = !leg1.no_token_id.empty() ? leg1.no_token_id : leg2.no_token_id;
+    if (out.yes_token_id.empty()) out.yes_token_id = leg2.yes_token_id;
+    if (out.no_token_id.empty()) out.no_token_id = leg2.no_token_id;
+    out.condition_id = !leg1.condition_id.empty() ? leg1.condition_id : leg2.condition_id;
+    out.yes_shares = a.yes_shares + b.yes_shares;
+    out.no_shares = a.no_shares + b.no_shares;
+    out.yes_cost = a.yes_cost + b.yes_cost;
+    out.no_cost = a.no_cost + b.no_cost;
+    if (a.yes_shares > kLihConsolidateTol && a.yes_entry_price > 0) {
+        out.yes_entry_price = a.yes_entry_price;
+    } else if (b.yes_shares > kLihConsolidateTol && b.yes_entry_price > 0) {
+        out.yes_entry_price = b.yes_entry_price;
+    } else if (out.yes_shares > kLihConsolidateTol) {
+        out.yes_entry_price = out.yes_cost / out.yes_shares;
+    }
+    if (a.no_shares > kLihConsolidateTol && a.no_entry_price > 0) {
+        out.no_entry_price = a.no_entry_price;
+    } else if (b.no_shares > kLihConsolidateTol && b.no_entry_price > 0) {
+        out.no_entry_price = b.no_entry_price;
+    } else if (out.no_shares > kLihConsolidateTol) {
+        out.no_entry_price = out.no_cost / out.no_shares;
+    }
+    out.entry_fees = a.entry_fees + b.entry_fees;
+    out.opened_at = std::min(a.opened_at, b.opened_at);
+    out.end_date_ts = leg1.end_date_ts > 0 ? leg1.end_date_ts : leg2.end_date_ts;
+    out.is_neg_risk = leg1.is_neg_risk || leg2.is_neg_risk;
+    out.paper_mode = leg1.paper_mode || leg2.paper_mode;
+    out.is_shadow = false;
+    out.rebalance_count = a.rebalance_count + b.rebalance_count;
+    if (a.yes_shares > kLihConsolidateTol) out.yes_exit_price = a.yes_exit_price;
+    else if (b.yes_shares > kLihConsolidateTol) out.yes_exit_price = b.yes_exit_price;
+    if (a.no_shares > kLihConsolidateTol) out.no_exit_price = a.no_exit_price;
+    else if (b.no_shares > kLihConsolidateTol) out.no_exit_price = b.no_exit_price;
+    out.closed_at = std::max(a.closed_at.value_or(0.0), b.closed_at.value_or(0.0));
+    out.pnl_usdc = a.pnl_usdc.value_or(0.0) + b.pnl_usdc.value_or(0.0);
+    out.exit_reason = leg2.exit_reason.empty() ? leg1.exit_reason : leg1.exit_reason;
+    if (out.exit_reason.find("hedged") == std::string::npos &&
+        (leg1.exit_reason.find("hedged") != std::string::npos ||
+         leg2.exit_reason.find("hedged") != std::string::npos)) {
+        out.exit_reason = "Market resolved (hedged)";
+    }
+    return out;
+}
+} // namespace
+
+void RiskManager::consolidate_closed_lih_positions() {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    const size_t before = closed_lih_positions_.size();
+    if (before == 0) return;
+
+    std::vector<LegInHedgePosition> sorted = closed_lih_positions_;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const LegInHedgePosition& a, const LegInHedgePosition& b) {
+                  return a.opened_at < b.opened_at;
+              });
+
+    std::vector<bool> used(sorted.size(), false);
+    std::vector<LegInHedgePosition> merged;
+    merged.reserve(sorted.size());
+
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        if (used[i] || sorted[i].is_shadow) continue;
+        LegInHedgePosition cur = sorted[i];
+
+        if (sorted.size() >= 2 && lih_dominant_side(cur) != ' ') {
+            int best_j = -1;
+            double best_dt = kLihPairSec + 1.0;
+            for (size_t j = i + 1; j < sorted.size(); ++j) {
+                if (used[j] || sorted[j].is_shadow) continue;
+                const auto& other = sorted[j];
+                if (lih_asset_key(other.asset) != lih_asset_key(cur.asset)) continue;
+                if (other.window_minutes != cur.window_minutes) continue;
+                if (!lih_should_pair_closed(cur, other)) continue;
+                const double dt = std::abs(cur.opened_at - other.opened_at);
+                if (dt <= kLihPairSec && dt < best_dt) {
+                    best_dt = dt;
+                    best_j = static_cast<int>(j);
+                }
+            }
+            if (best_j >= 0) {
+                used[static_cast<size_t>(best_j)] = true;
+                cur = merge_closed_lih_pair(cur, sorted[static_cast<size_t>(best_j)]);
+                spdlog::info("[LIH] consolidated split closed rows -> {} | Y={:.1f} N={:.1f} pnl ${:+.2f}",
+                             cur.lih_id, cur.yes_shares, cur.no_shares, cur.pnl_usdc.value_or(0.0));
+            }
+        }
+
+        used[i] = true;
+        merged.push_back(std::move(cur));
+    }
+
+    // Dedupe by lih_id (keep newest closed_at).
+    std::unordered_map<std::string, LegInHedgePosition> by_id;
+    std::vector<std::string> id_order;
+    for (auto& p : merged) {
+        if (p.is_shadow) continue;
+        auto it = by_id.find(p.lih_id);
+        if (it == by_id.end()) {
+            id_order.push_back(p.lih_id);
+            by_id[p.lih_id] = std::move(p);
+            continue;
+        }
+        const double keep_ts = it->second.closed_at.value_or(0.0);
+        const double new_ts = p.closed_at.value_or(0.0);
+        if (new_ts >= keep_ts) it->second = std::move(p);
+    }
+    merged.clear();
+    merged.reserve(by_id.size());
+    for (const auto& id : id_order) {
+        auto it = by_id.find(id);
+        if (it != by_id.end()) merged.push_back(std::move(it->second));
+    }
+
+    double lih_sum = 0.0;
+    for (const auto& p : merged) {
+        lih_sum += p.pnl_usdc.value_or(0.0);
+    }
+    lih_pnl_ = lih_sum;
+    total_pnl_ = lih_pnl_ + dh_pnl_ + la_pnl_;
+
+    if (merged.size() != before) {
+        spdlog::info("[LIH] closed history consolidated {} -> {} row(s), lih_pnl ${:+.2f}",
+                     before, merged.size(), lih_pnl_);
+    }
+    closed_lih_positions_ = std::move(merged);
 }
 
 void RiskManager::set_lih_pause_after_round(bool v) {
@@ -734,10 +1042,18 @@ double RiskManager::get_lih_min_balance_usdc() const {
 bool RiskManager::try_begin_lih_leg1(const std::string& asset, int window_minutes) {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
     const std::string key = lih_slot_key(asset, window_minutes);
-    if (lih_leg1_inflight_.count(key)) return false;
+    std::string want = asset;
+    std::transform(want.begin(), want.end(), want.begin(), ::tolower);
     for (const auto& [id, p] : open_lih_positions_) {
-        if (p.asset == asset && p.window_minutes == window_minutes) return false;
+        (void)id;
+        std::string have = p.asset;
+        std::transform(have.begin(), have.end(), have.begin(), ::tolower);
+        if (have == want && p.window_minutes == window_minutes) {
+            lih_leg1_inflight_.erase(key);
+            return false;
+        }
     }
+    if (lih_leg1_inflight_.count(key)) return false;
     if (lih_other_slot_busy_unlocked(asset, window_minutes)) {
         spdlog::info("[LIH] LEG1 blocked {} {}m — another slot is active/in-flight", asset, window_minutes);
         return false;
@@ -754,12 +1070,15 @@ bool RiskManager::try_begin_lih_leg1(const std::string& asset, int window_minute
     }
     if (get_open_position_count() >= max_concurrent_positions_) return false;
     lih_leg1_inflight_.insert(key);
+    lih_leg1_inflight_since_[key] = static_cast<double>(std::time(nullptr));
     return true;
 }
 
 void RiskManager::end_lih_leg1_inflight(const std::string& asset, int window_minutes) {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
-    lih_leg1_inflight_.erase(lih_slot_key(asset, window_minutes));
+    const std::string key = lih_slot_key(asset, window_minutes);
+    lih_leg1_inflight_.erase(key);
+    lih_leg1_inflight_since_.erase(key);
 }
 
 bool RiskManager::lih_rebalance_inflight(const std::string& lih_id) const {
@@ -812,16 +1131,22 @@ LegInHedgePosition RiskManager::register_lih_open_leg1(
     if (buy_yes) {
         pos.yes_shares = shares;
         pos.yes_cost = cost;
+        pos.yes_entry_price = price;
     } else {
         pos.no_shares = shares;
         pos.no_cost = cost;
+        pos.no_entry_price = price;
     }
     pos.entry_fees = fee;
     if (debit_balance) {
         current_balance_ -= (cost + fee);
     }
     open_lih_positions_[pos.lih_id] = pos;
-    lih_leg1_inflight_.erase(lih_slot_key(market.asset, market.window_minutes));
+    {
+        const std::string key = lih_slot_key(market.asset, market.window_minutes);
+        lih_leg1_inflight_.erase(key);
+        lih_leg1_inflight_since_.erase(key);
+    }
     if (!is_paper && debit_balance) {
         ++lih_session_legs_used_;
     }
@@ -842,14 +1167,27 @@ void RiskManager::register_lih_add_leg(
     auto it = open_lih_positions_.find(lih_id);
     if (it == open_lih_positions_.end()) return;
     lih_rebalance_inflight_.erase(lih_id);
+    {
+        const std::string key = lih_slot_key(it->second.asset, it->second.window_minutes);
+        lih_leg1_inflight_.erase(key);
+        lih_leg1_inflight_since_.erase(key);
+    }
     ++it->second.rebalance_count;
     const int n = it->second.rebalance_count;
     const double cost = price * shares;
     const double fee = cost * fee_rate_;
     if (buy_yes) {
+        const double prev = it->second.yes_shares;
+        it->second.yes_entry_price = prev > kFloatTol
+            ? (it->second.yes_entry_price * prev + price * shares) / (prev + shares)
+            : price;
         it->second.yes_shares += shares;
         it->second.yes_cost += cost;
     } else {
+        const double prev = it->second.no_shares;
+        it->second.no_entry_price = prev > kFloatTol
+            ? (it->second.no_entry_price * prev + price * shares) / (prev + shares)
+            : price;
         it->second.no_shares += shares;
         it->second.no_cost += cost;
     }
@@ -935,6 +1273,11 @@ std::optional<LegInHedgePosition> RiskManager::register_lih_close(
 
     open_lih_positions_.erase(it);
     lih_rebalance_inflight_.erase(lih_id);
+    {
+        const std::string key = lih_slot_key(pos.asset, pos.window_minutes);
+        lih_leg1_inflight_.erase(key);
+        lih_leg1_inflight_since_.erase(key);
+    }
     closed_lih_positions_.push_back(pos);
     if (closed_lih_positions_.size() > 500) {
         closed_lih_positions_.erase(closed_lih_positions_.begin());
@@ -947,6 +1290,7 @@ std::optional<LegInHedgePosition> RiskManager::register_lih_close(
         maybe_pause_after_lih_round(exit_reason);
     }
     check_risk_thresholds();
+    consolidate_closed_lih_positions();
     return pos;
 }
 
@@ -1000,7 +1344,13 @@ int RiskManager::purge_expired_lih_open(double now_sec, double grace_sec) {
         }
         if (shadow) {
             std::lock_guard<std::recursive_mutex> lock(mtx_);
-            open_lih_positions_.erase(id);
+            auto it = open_lih_positions_.find(id);
+            if (it != open_lih_positions_.end()) {
+                const std::string key = lih_slot_key(it->second.asset, it->second.window_minutes);
+                lih_leg1_inflight_.erase(key);
+                lih_leg1_inflight_since_.erase(key);
+                open_lih_positions_.erase(it);
+            }
             lih_rebalance_inflight_.erase(id);
             closed++;
             continue;
@@ -1381,7 +1731,7 @@ bool position_from_json(const boost::json::object& o, Position& p) {
         p.direction = o.contains("direction") ? std::string(o.at("direction").as_string()) : "";
         p.strategy = o.contains("strategy") ? std::string(o.at("strategy").as_string()) : "LA";
         p.condition_id = o.contains("condition_id") ? std::string(o.at("condition_id").as_string()) : "";
-        p.paper_mode = !o.contains("paper_mode") || o.at("paper_mode").as_bool();
+        p.paper_mode = o.contains("paper_mode") && o.at("paper_mode").as_bool();
         p.peak_price = o.contains("peak_price") ? o.at("peak_price").as_double() : 0.0;
         p.is_neg_risk = o.contains("is_neg_risk") && o.at("is_neg_risk").as_bool();
         p.closed_at = std::nullopt;
@@ -1443,7 +1793,7 @@ bool dh_position_from_json(const boost::json::object& o, DumpHedgePosition& p) {
         p.locked_profit_usdc = o.contains("locked_profit_usdc") ? o.at("locked_profit_usdc").as_double() : 0.0;
         p.opened_at = o.at("opened_at").as_double();
         p.end_date_ts = o.contains("end_date_ts") ? o.at("end_date_ts").as_double() : 0.0;
-        p.paper_mode = !o.contains("paper_mode") || o.at("paper_mode").as_bool();
+        p.paper_mode = o.contains("paper_mode") && o.at("paper_mode").as_bool();
         p.strategy = o.contains("strategy") ? std::string(o.at("strategy").as_string()) : "DH";
         p.is_neg_risk = o.contains("is_neg_risk") && o.at("is_neg_risk").as_bool();
         p.window_minutes = o.contains("window_minutes") ? static_cast<int>(o.at("window_minutes").as_int64()) : 5;
@@ -1475,6 +1825,8 @@ boost::json::object lih_position_to_json(const LegInHedgePosition& p) {
     o["no_shares"] = p.no_shares;
     o["yes_cost"] = p.yes_cost;
     o["no_cost"] = p.no_cost;
+    if (p.yes_entry_price > 0) o["yes_entry_price"] = p.yes_entry_price;
+    if (p.no_entry_price > 0) o["no_entry_price"] = p.no_entry_price;
     o["opened_at"] = p.opened_at;
     o["end_date_ts"] = p.end_date_ts;
     o["window_minutes"] = p.window_minutes;
@@ -1503,11 +1855,13 @@ bool lih_position_from_json(const boost::json::object& o, LegInHedgePosition& p)
         p.no_shares = o.at("no_shares").as_double();
         p.yes_cost = o.at("yes_cost").as_double();
         p.no_cost = o.at("no_cost").as_double();
+        p.yes_entry_price = o.contains("yes_entry_price") ? o.at("yes_entry_price").as_double() : 0.0;
+        p.no_entry_price = o.contains("no_entry_price") ? o.at("no_entry_price").as_double() : 0.0;
         p.opened_at = o.at("opened_at").as_double();
         p.end_date_ts = o.contains("end_date_ts") ? o.at("end_date_ts").as_double() : 0.0;
         p.window_minutes = o.contains("window_minutes") ? static_cast<int>(o.at("window_minutes").as_int64()) : 5;
         p.is_neg_risk = o.contains("is_neg_risk") && o.at("is_neg_risk").as_bool();
-        p.paper_mode = !o.contains("paper_mode") || o.at("paper_mode").as_bool();
+        p.paper_mode = o.contains("paper_mode") && o.at("paper_mode").as_bool();
         p.is_shadow = o.contains("is_shadow") && o.at("is_shadow").as_bool();
         p.exit_reason = o.contains("exit_reason") ? std::string(o.at("exit_reason").as_string()) : "";
         p.rebalance_count = o.contains("rebalance_count") ? static_cast<int>(o.at("rebalance_count").as_int64()) : 0;
@@ -1555,197 +1909,6 @@ void json_to_string_double_map(const boost::json::object& o, std::unordered_map<
 
 } // namespace
 
-boost::json::object RiskManager::export_paper_state() const {
-    std::lock_guard<std::recursive_mutex> lock(mtx_);
-    boost::json::object root;
-    root["version"] = 1;
-    root["saved_at"] = now();
-    root["starting_balance"] = starting_balance_;
-    root["current_balance"] = current_balance_;
-    root["peak_balance"] = peak_balance_;
-    root["daily_starting_balance"] = daily_starting_balance_;
-    root["daily_reset_time"] = daily_reset_time_;
-    root["status"] = static_cast<int>(status_);
-    if (kill_reason_) root["kill_reason"] = *kill_reason_;
-    root["total_trades"] = total_trades_;
-    root["winning_trades"] = winning_trades_;
-    root["total_dh_trades"] = total_dh_trades_;
-    root["total_lih_trades"] = total_lih_trades_;
-    root["total_pnl"] = total_pnl_;
-    root["la_pnl"] = la_pnl_;
-    root["dh_pnl"] = dh_pnl_;
-    root["lih_pnl"] = lih_pnl_;
-    root["circuit_breaker_resume_at"] = circuit_breaker_resume_at_;
-
-    boost::json::object open_la;
-    for (const auto& [id, p] : open_positions_) open_la[id] = position_to_json(p);
-    root["open_positions"] = std::move(open_la);
-
-    boost::json::object open_dh;
-    for (const auto& [id, p] : open_dh_positions_) open_dh[id] = dh_position_to_json(p);
-    root["open_dh_positions"] = std::move(open_dh);
-
-    boost::json::array closed_la;
-    size_t la_start = closed_positions_.size() > 200 ? closed_positions_.size() - 200 : 0;
-    for (size_t i = la_start; i < closed_positions_.size(); ++i) {
-        closed_la.push_back(position_to_json(closed_positions_[i]));
-    }
-    root["closed_positions"] = std::move(closed_la);
-
-    boost::json::array closed_dh;
-    size_t dh_start = closed_dh_positions_.size() > 200 ? closed_dh_positions_.size() - 200 : 0;
-    for (size_t i = dh_start; i < closed_dh_positions_.size(); ++i) {
-        closed_dh.push_back(dh_position_to_json(closed_dh_positions_[i]));
-    }
-    root["closed_dh_positions"] = std::move(closed_dh);
-
-    boost::json::object open_lih;
-    for (const auto& [id, p] : open_lih_positions_) {
-        if (p.is_shadow) continue;
-        open_lih[id] = lih_position_to_json(p);
-    }
-    root["open_lih_positions"] = std::move(open_lih);
-
-    boost::json::array closed_lih;
-    size_t lih_start = closed_lih_positions_.size() > 200 ? closed_lih_positions_.size() - 200 : 0;
-    for (size_t i = lih_start; i < closed_lih_positions_.size(); ++i) {
-        if (closed_lih_positions_[i].is_shadow) continue;
-        closed_lih.push_back(lih_position_to_json(closed_lih_positions_[i]));
-    }
-    root["closed_lih_positions"] = std::move(closed_lih);
-
-    root["asset_trades"] = string_int_map_to_json(asset_trades_);
-    root["asset_wins"] = string_int_map_to_json(asset_wins_);
-    root["asset_pnl"] = string_double_map_to_json(asset_pnl_);
-
-    boost::json::array la_pnls;
-    for (double v : recent_la_pnls_) la_pnls.push_back(v);
-    root["recent_la_pnls"] = std::move(la_pnls);
-
-    boost::json::array dh_pnls;
-    for (double v : recent_dh_pnls_) dh_pnls.push_back(v);
-    root["recent_dh_pnls"] = std::move(dh_pnls);
-
-    return root;
-}
-
-bool RiskManager::import_paper_state(const boost::json::object& doc) {
-    std::lock_guard<std::recursive_mutex> lock(mtx_);
-    try {
-        if (!doc.contains("version") || doc.at("version").as_int64() != 1) return false;
-
-        starting_balance_ = doc.at("starting_balance").as_double();
-        current_balance_ = doc.at("current_balance").as_double();
-        peak_balance_ = doc.contains("peak_balance") ? doc.at("peak_balance").as_double() : current_balance_;
-        daily_starting_balance_ = doc.contains("daily_starting_balance")
-            ? doc.at("daily_starting_balance").as_double() : current_balance_;
-        daily_reset_time_ = doc.contains("daily_reset_time")
-            ? doc.at("daily_reset_time").as_double() : next_midnight();
-
-        status_ = static_cast<TradingStatus>(doc.contains("status") ? static_cast<int>(doc.at("status").as_int64()) : 0);
-        kill_reason_ = std::nullopt;
-        if (doc.contains("kill_reason") && doc.at("kill_reason").is_string()) {
-            kill_reason_ = std::string(doc.at("kill_reason").as_string());
-        }
-
-        total_trades_ = doc.contains("total_trades") ? static_cast<int>(doc.at("total_trades").as_int64()) : 0;
-        winning_trades_ = doc.contains("winning_trades") ? static_cast<int>(doc.at("winning_trades").as_int64()) : 0;
-        total_dh_trades_ = doc.contains("total_dh_trades") ? static_cast<int>(doc.at("total_dh_trades").as_int64()) : 0;
-        total_lih_trades_ = doc.contains("total_lih_trades") ? static_cast<int>(doc.at("total_lih_trades").as_int64()) : 0;
-        total_pnl_ = doc.contains("total_pnl") ? doc.at("total_pnl").as_double() : 0.0;
-        la_pnl_ = doc.contains("la_pnl") ? doc.at("la_pnl").as_double() : 0.0;
-        dh_pnl_ = doc.contains("dh_pnl") ? doc.at("dh_pnl").as_double() : 0.0;
-        lih_pnl_ = doc.contains("lih_pnl") ? doc.at("lih_pnl").as_double() : 0.0;
-        circuit_breaker_resume_at_ = doc.contains("circuit_breaker_resume_at")
-            ? doc.at("circuit_breaker_resume_at").as_double() : 0.0;
-
-        open_positions_.clear();
-        if (doc.contains("open_positions") && doc.at("open_positions").is_object()) {
-            for (const auto& kv : doc.at("open_positions").as_object()) {
-                Position p;
-                if (position_from_json(kv.value().as_object(), p)) {
-                    open_positions_[p.order_id] = p;
-                }
-            }
-        }
-
-        open_dh_positions_.clear();
-        if (doc.contains("open_dh_positions") && doc.at("open_dh_positions").is_object()) {
-            for (const auto& kv : doc.at("open_dh_positions").as_object()) {
-                DumpHedgePosition p;
-                if (dh_position_from_json(kv.value().as_object(), p)) {
-                    open_dh_positions_[p.dh_id] = p;
-                }
-            }
-        }
-
-        closed_positions_.clear();
-        if (doc.contains("closed_positions") && doc.at("closed_positions").is_array()) {
-            for (const auto& v : doc.at("closed_positions").as_array()) {
-                Position p;
-                if (position_from_json(v.as_object(), p)) closed_positions_.push_back(p);
-            }
-        }
-
-        closed_dh_positions_.clear();
-        if (doc.contains("closed_dh_positions") && doc.at("closed_dh_positions").is_array()) {
-            for (const auto& v : doc.at("closed_dh_positions").as_array()) {
-                DumpHedgePosition p;
-                if (dh_position_from_json(v.as_object(), p)) closed_dh_positions_.push_back(p);
-            }
-        }
-
-        open_lih_positions_.clear();
-        if (doc.contains("open_lih_positions") && doc.at("open_lih_positions").is_object()) {
-            for (const auto& kv : doc.at("open_lih_positions").as_object()) {
-                LegInHedgePosition p;
-                if (lih_position_from_json(kv.value().as_object(), p)) {
-                    open_lih_positions_[p.lih_id] = p;
-                }
-            }
-        }
-
-        closed_lih_positions_.clear();
-        if (doc.contains("closed_lih_positions") && doc.at("closed_lih_positions").is_array()) {
-            for (const auto& v : doc.at("closed_lih_positions").as_array()) {
-                LegInHedgePosition p;
-                if (lih_position_from_json(v.as_object(), p)) {
-                    if (!p.is_shadow) closed_lih_positions_.push_back(p);
-                }
-            }
-        }
-
-        if (doc.contains("asset_trades") && doc.at("asset_trades").is_object()) {
-            json_to_string_int_map(doc.at("asset_trades").as_object(), asset_trades_);
-        }
-        if (doc.contains("asset_wins") && doc.at("asset_wins").is_object()) {
-            json_to_string_int_map(doc.at("asset_wins").as_object(), asset_wins_);
-        }
-        if (doc.contains("asset_pnl") && doc.at("asset_pnl").is_object()) {
-            json_to_string_double_map(doc.at("asset_pnl").as_object(), asset_pnl_);
-        }
-
-        recent_la_pnls_.clear();
-        if (doc.contains("recent_la_pnls") && doc.at("recent_la_pnls").is_array()) {
-            for (const auto& v : doc.at("recent_la_pnls").as_array()) {
-                if (v.is_double()) recent_la_pnls_.push_back(v.as_double());
-            }
-        }
-
-        recent_dh_pnls_.clear();
-        if (doc.contains("recent_dh_pnls") && doc.at("recent_dh_pnls").is_array()) {
-            for (const auto& v : doc.at("recent_dh_pnls").as_array()) {
-                if (v.is_double()) recent_dh_pnls_.push_back(v.as_double());
-            }
-        }
-
-        return true;
-    } catch (const std::exception& e) {
-        spdlog::warn("import_paper_state failed: {}", e.what());
-        return false;
-    }
-}
-
 boost::json::object RiskManager::export_live_lih_state() const {
     std::lock_guard<std::recursive_mutex> lock(mtx_);
     boost::json::object root;
@@ -1756,14 +1919,14 @@ boost::json::object RiskManager::export_live_lih_state() const {
     root["lih_pnl"] = lih_pnl_;
     boost::json::object open_lih;
     for (const auto& [id, p] : open_lih_positions_) {
-        if (p.is_shadow) continue;
+        if (p.is_shadow || p.paper_mode) continue;
         open_lih[id] = lih_position_to_json(p);
     }
     root["open_lih_positions"] = std::move(open_lih);
     boost::json::array closed_lih;
     size_t lih_start = closed_lih_positions_.size() > 200 ? closed_lih_positions_.size() - 200 : 0;
     for (size_t i = lih_start; i < closed_lih_positions_.size(); ++i) {
-        if (closed_lih_positions_[i].is_shadow) continue;
+        if (closed_lih_positions_[i].is_shadow || closed_lih_positions_[i].paper_mode) continue;
         closed_lih.push_back(lih_position_to_json(closed_lih_positions_[i]));
     }
     root["closed_lih_positions"] = std::move(closed_lih);
@@ -1788,6 +1951,7 @@ bool RiskManager::import_live_lih_state(const boost::json::object& doc) {
             for (const auto& kv : doc.at("open_lih_positions").as_object()) {
                 LegInHedgePosition p;
                 if (lih_position_from_json(kv.value().as_object(), p)) {
+                    if (p.paper_mode || p.is_shadow) continue;
                     open_lih_positions_[p.lih_id] = p;
                 }
             }
@@ -1798,12 +1962,17 @@ bool RiskManager::import_live_lih_state(const boost::json::object& doc) {
             for (const auto& v : doc.at("closed_lih_positions").as_array()) {
                 LegInHedgePosition p;
                 if (lih_position_from_json(v.as_object(), p)) {
-                    if (!p.is_shadow) closed_lih_positions_.push_back(p);
+                    if (p.is_shadow || p.paper_mode) continue;
+                    closed_lih_positions_.push_back(p);
                 }
             }
         }
 
+        consolidate_closed_lih_positions();
+
         lih_leg1_inflight_.clear();
+        lih_leg1_inflight_since_.clear();
+        lih_rebalance_inflight_.clear();
         if (doc.contains("lih_session_legs_used")) {
             lih_session_legs_used_ = static_cast<int>(doc.at("lih_session_legs_used").as_int64());
         }

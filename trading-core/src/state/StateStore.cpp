@@ -465,6 +465,10 @@ std::string StateStore::get_dashboard_json() const {
         double peak = risk_manager_->get_peak_balance();
         double daily_pnl = balance - daily_start;
         double total_pnl = balance - start;
+        if (!paper_mode_ && trades_baseline_ts_ > 0) {
+            total_pnl = risk_manager_->get_lih_pnl() + risk_manager_->get_dh_pnl() +
+                        risk_manager_->get_la_pnl();
+        }
         double drawdown = peak > 0 ? (peak - balance) / peak * 100.0 : 0.0;
 
         root["balance"] = balance;
@@ -626,6 +630,7 @@ std::string StateStore::get_dashboard_json() const {
             pos_arr.push_back(po);
         }
         for (const auto& [id, p] : risk_manager_->get_open_lih_positions()) {
+            if (!paper_mode_ && (p.paper_mode || p.is_shadow)) continue;
             boost::json::object po;
             const double yes_avg = p.yes_shares > 0 ? p.yes_cost / p.yes_shares : 0.0;
             const double no_avg = p.no_shares > 0 ? p.no_cost / p.no_shares : 0.0;
@@ -745,8 +750,10 @@ std::string StateStore::get_dashboard_json() const {
             if (p.is_shadow) continue;
             const double ts = p.closed_at.value_or(p.opened_at);
             if (!after_baseline(ts)) continue;
-            const double yes_avg = p.yes_shares > 0 ? p.yes_cost / p.yes_shares : 0.0;
-            const double no_avg = p.no_shares > 0 ? p.no_cost / p.no_shares : 0.0;
+            const double yes_avg = p.yes_entry_price > 0 ? p.yes_entry_price
+                : (p.yes_shares > 0 ? p.yes_cost / p.yes_shares : 0.0);
+            const double no_avg = p.no_entry_price > 0 ? p.no_entry_price
+                : (p.no_shares > 0 ? p.no_cost / p.no_shares : 0.0);
             const double matched = std::min(p.yes_shares, p.no_shares);
             const double yes_exit = p.yes_exit_price.value_or(0.0);
             const double no_exit = p.no_exit_price.value_or(0.0);
@@ -766,7 +773,7 @@ std::string StateStore::get_dashboard_json() const {
             h["exitPrice"] = yes_exit + no_exit;
             h["size"] = matched > 0 ? matched : std::max(p.yes_shares, p.no_shares);
             h["costUsdc"] = p.yes_cost + p.no_cost;
-            h["entryFee"] = (p.yes_cost + p.no_cost) * fr;
+            h["entryFee"] = p.entry_fees > 0 ? p.entry_fees : (p.yes_cost + p.no_cost) * fr;
             const double gross = yes_exit * p.yes_shares + no_exit * p.no_shares;
             h["exitFee"] = gross * fr;
             h["pnlUsdc"] = p.pnl_usdc.value_or(0.0);
@@ -838,8 +845,10 @@ std::string StateStore::get_dashboard_json() const {
         for (const auto& [id, p] : risk_manager_->get_open_lih_positions()) {
             if (!after_baseline(p.opened_at)) continue;
             if (p.is_shadow) continue;
-            const double yes_avg = p.yes_shares > 0 ? p.yes_cost / p.yes_shares : 0.0;
-            const double no_avg = p.no_shares > 0 ? p.no_cost / p.no_shares : 0.0;
+            const double yes_avg = p.yes_entry_price > 0 ? p.yes_entry_price
+                : (p.yes_shares > 0 ? p.yes_cost / p.yes_shares : 0.0);
+            const double no_avg = p.no_entry_price > 0 ? p.no_entry_price
+                : (p.no_shares > 0 ? p.no_cost / p.no_shares : 0.0);
             const double matched = std::min(p.yes_shares, p.no_shares);
             boost::json::object h;
             h["id"] = id.c_str();
@@ -854,7 +863,7 @@ std::string StateStore::get_dashboard_json() const {
             h["entryPrice"] = yes_avg + no_avg;
             h["size"] = matched > 0 ? matched : std::max(p.yes_shares, p.no_shares);
             h["costUsdc"] = p.yes_cost + p.no_cost;
-            h["entryFee"] = (p.yes_cost + p.no_cost) * fr;
+            h["entryFee"] = p.entry_fees > 0 ? p.entry_fees : (p.yes_cost + p.no_cost) * fr;
             h["exitFee"] = 0.0;
             const double yes_bid = token_mark(p.yes_token_id);
             const double no_bid = token_mark(p.no_token_id);

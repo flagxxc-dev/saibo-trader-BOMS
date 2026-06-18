@@ -102,7 +102,7 @@ def _apply_wallet_snapshot(detail: dict) -> bool:
     obj["cashBalance"] = cash
     obj["positionsValue"] = pos
     obj["walletSource"] = str(detail.get("source") or "live")
-    paper = os.getenv("PAPER_MODE", "true").lower() not in ("false", "0", "no", "off")
+    paper = os.getenv("PAPER_MODE", "false").lower() not in ("false", "0", "no", "off")
     if not paper:
         obj["balance"] = total
     latest_data = json.dumps(obj, ensure_ascii=False)
@@ -149,7 +149,7 @@ def _wallet_sync_once() -> None:
 def _print_startup_banner() -> None:
     cfg = public_config()
     pre = _read_preflight()
-    mode = (pre.get("mode") or ("paper" if os.getenv("PAPER_MODE", "true").lower() != "false" else "live")).upper()
+    mode = (pre.get("mode") or ("paper" if os.getenv("PAPER_MODE", "false").lower() not in ("false", "0", "no", "off") else "live")).upper()
     ok = pre.get("ok", True)
     mark = "✅" if ok else "⚠️"
     print(f"\n{mark} Bridge 就绪 | 模式 {mode} | WS :{WS_PORT} | API :{HTTP_PORT}", file=sys.stderr)
@@ -463,7 +463,7 @@ def _live_maintenance_loop() -> None:
     """Prune expired LIH rows from disk; chain reconcile only in real live (not shadow)."""
     while True:
         time.sleep(60)
-        if os.getenv("PAPER_MODE", "true").lower() in ("false", "0", "no", "off"):
+        if os.getenv("PAPER_MODE", "false").lower() in ("false", "0", "no", "off"):
             try:
                 subprocess.run(
                     [sys.executable, "scripts/prune_live_lih.py"],
@@ -477,7 +477,13 @@ def _live_maintenance_loop() -> None:
                     "no",
                     "off",
                 )
-                if live_dry:
+                recon_enabled = os.getenv("LIVE_LIH_RECONCILE_ENABLED", "false").lower() not in (
+                    "false",
+                    "0",
+                    "no",
+                    "off",
+                )
+                if live_dry or not recon_enabled:
                     continue
                 subprocess.run(
                     [sys.executable, "scripts/live_lih_reconcile.py", "--merge"],
@@ -507,6 +513,10 @@ def _mark_core_offline(reason: str = "trading-core stopped") -> None:
 
 def run_core():
     global latest_data
+    env = os.environ.copy()
+    venv_bin = os.path.join(os.getcwd(), ".venv", "bin")
+    if os.path.isdir(venv_bin):
+        env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
     process = subprocess.Popen(
         CORE_CMD,
         stdout=subprocess.PIPE,
@@ -514,6 +524,7 @@ def run_core():
         text=True,
         bufsize=1,
         cwd=os.getcwd(),
+        env=env,
     )
 
     def log_stderr():

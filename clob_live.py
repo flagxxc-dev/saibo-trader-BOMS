@@ -12,7 +12,13 @@ from typing import Any
 
 from dotenv import load_dotenv
 from py_clob_client_v2.client import ClobClient
-from py_clob_client_v2.clob_types import ApiCreds, OrderArgsV2, OrderType, PartialCreateOrderOptions
+from py_clob_client_v2.clob_types import (
+    ApiCreds,
+    MarketOrderArgsV2,
+    OrderArgsV2,
+    OrderType,
+    PartialCreateOrderOptions,
+)
 from py_clob_client_v2.constants import POLYGON
 
 load_dotenv()
@@ -55,23 +61,25 @@ def _client() -> ClobClient:
 
 
 def round_clob_buy(price: float, size_shares: float) -> tuple[float, float]:
-    """Polymarket BUY: maker USDC max 2 decimals, taker shares max 4 decimals."""
-    price = round(float(price), 4)
-    if price <= 0 or size_shares <= 0:
-        return price, 0.0
-    size = math.floor(float(size_shares) * 10000 + 1e-9) / 10000
-    usdc = math.floor(price * size * 100 + 1e-9) / 100
-    if usdc < _MIN_BUY_USDC:
-        min_size = math.ceil((_MIN_BUY_USDC / price) * 10000) / 10000
-        size = min_size
-        usdc = math.floor(price * size * 100 + 1e-9) / 100
-    if usdc < _MIN_BUY_USDC:
-        return price, 0.0
-    size = math.floor((usdc / price) * 10000 + 1e-9) / 10000
-    usdc = math.floor(price * size * 100 + 1e-9) / 100
-    if usdc < _MIN_BUY_USDC or size <= 0:
-        return price, 0.0
+    """Polymarket BUY: 2dp USDC (maker) + implied shares (taker max 4dp via market path)."""
+    price, usdc, size = buy_usdc_for_shares(price, size_shares)
     return price, size
+
+
+def buy_usdc_for_shares(price: float, size_shares: float) -> tuple[float, float, float]:
+    """Return (price, usdc_2dp, implied_shares) for market-style FAK buys."""
+    price = round(float(price), 2)
+    if price <= 0 or size_shares <= 0:
+        return price, 0.0, 0.0
+    size_2dp = math.floor(float(size_shares) * 100 + 1e-9) / 100
+    usdc = math.floor(price * size_2dp * 100 + 1e-9) / 100
+    if usdc < _MIN_BUY_USDC:
+        size_2dp = math.ceil((_MIN_BUY_USDC / price) * 100) / 100
+        usdc = math.floor(price * size_2dp * 100 + 1e-9) / 100
+    if usdc < _MIN_BUY_USDC:
+        return price, 0.0, 0.0
+    implied = math.floor((usdc / price) * 10000 + 1e-9) / 10000
+    return price, usdc, implied
 
 
 def round_clob_sell(price: float, size_shares: float) -> tuple[float, float]:
@@ -354,10 +362,13 @@ def post_fak_order(
         return {"success": False, "error": f"invalid side: {side}"}
 
     if side_u == "BUY":
-        price, size_shares = round_clob_buy(price, size_shares)
+        price, usdc, size_shares = buy_usdc_for_shares(price, size_shares)
     else:
         price, size_shares = round_clob_sell(price, size_shares)
-    if size_shares <= 0:
+        usdc = 0.0
+    if side_u == "BUY" and usdc <= 0:
+        return {"success": False, "error": "size below exchange minimum after rounding"}
+    if side_u == "SELL" and size_shares <= 0:
         return {"success": False, "error": "size below exchange minimum after rounding"}
 
     submit_ts = time.time()
@@ -374,14 +385,25 @@ def post_fak_order(
             )
         except Exception:
             pass
-        args = OrderArgsV2(
-            token_id=str(token_id),
-            price=float(price),
-            size=float(size_shares),
-            side=side_u,
-        )
         opts = PartialCreateOrderOptions(neg_risk=True) if neg_risk else None
-        resp = client.create_and_post_order(args, options=opts, order_type=OrderType.FAK)
+        if side_u == "BUY":
+            # FAK at ask is treated as market buy — limit path yields 4dp USDC and CLOB rejects.
+            margs = MarketOrderArgsV2(
+                token_id=str(token_id),
+                amount=float(usdc),
+                side=side_u,
+                price=float(price),
+                order_type=OrderType.FAK,
+            )
+            resp = client.create_and_post_market_order(margs, options=opts, order_type=OrderType.FAK)
+        else:
+            args = OrderArgsV2(
+                token_id=str(token_id),
+                price=float(price),
+                size=float(size_shares),
+                side=side_u,
+            )
+            resp = client.create_and_post_order(args, options=opts, order_type=OrderType.FAK)
     except Exception as exc:
         order_id = _extract_order_id(getattr(exc, "error_message", None) or str(exc))
         if order_id:

@@ -18,6 +18,19 @@ USER = "root"
 REPO = "https://github.com/TrendHunter/saibo-trader.git"
 PROJ = "/opt/polymarket-bot"
 
+# VPS ~1GB RAM: kill stale compiles, use build-lowmem.sh (no LTO, ninja -j1).
+KILL_STALE_BUILD = (
+    "pkill -9 -f build-lowmem.sh 2>/dev/null || true; "
+    "pkill -9 -f build.sh 2>/dev/null || true; "
+    "pkill -9 -f 'cmake --build' 2>/dev/null || true; "
+    "pkill -9 -f ninja 2>/dev/null || true; "
+    "pkill -9 -f lto1 2>/dev/null || true; "
+    "pkill -9 -f cc1plus 2>/dev/null || true; "
+    "sleep 1"
+)
+BUILD_VPS = f"cd '{PROJ}' && chmod +x build.sh build-lowmem.sh && bash build-lowmem.sh"
+BUILD_LOCAL = f"cd '{PROJ}' && chmod +x build.sh && ./build.sh"
+
 STRATEGY_SYNC_PREFIXES = (
     "RISK_",
     "LIH_",
@@ -184,7 +197,7 @@ def main() -> int:
                 f"test -f '{PROJ}/.env' || cp '{PROJ}/.env.example' '{PROJ}/.env'",
                 "dnf install -y gcc gcc-c++ make git openssl-devel python3 python3-pip 2>/dev/null || "
                 "yum install -y gcc gcc-c++ make git openssl-devel python3 python3-pip",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"cd '{PROJ}' && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
                 "pkill -f 'start_bot.py' || true; pkill -f 'dashboard_bridge.py' || true; pkill -f 'trading-core' || true; sleep 2",
                 f"cd '{PROJ}' && mkdir -p logs && nohup .venv/bin/python start_bot.py >> logs/bridge.log 2>&1 &",
@@ -195,7 +208,7 @@ def main() -> int:
             rc = 0
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and ("git clone" in step or "./build.sh" in step):
+                if r != 0 and ("git clone" in step or "build.sh" in step or "build-lowmem" in step):
                     return r
                 if r != 0:
                     rc = r
@@ -355,7 +368,7 @@ print("patched", len(updates), "keys")
                 f"sed -i 's/^LIVE_DH_DRY_RUN=.*/LIVE_DH_DRY_RUN=true/' '{PROJ}/.env' || "
                 f"echo 'LIVE_DH_DRY_RUN=true' >> '{PROJ}/.env'",
                 f"grep -E '^(PAPER_MODE|LIVE_DH_DRY_RUN|RISK_MAX)' '{PROJ}/.env' | head -6",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"chmod +x '{remote_bot}' && bash '{remote_bot}'",
                 "sleep 10",
                 "pgrep -af 'start_bot|trading-core' || true",
@@ -366,7 +379,7 @@ print("patched", len(updates), "keys")
                 r = run(client, step, timeout=3600)
                 if r != 0 and "git pull" in step:
                     rc = r
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return rc
 
@@ -411,7 +424,7 @@ print("patched", len(updates), "keys")
                 f"cp '{PROJ}/build/trading-core' '{PROJ}/build/trading-core.bak-$(date +%s)' 2>/dev/null || true",
                 env_patch,
                 f"grep -E '^(PAPER_MODE|LIVE_DH_DRY_RUN|DH_BOOK_AWARE_DETECT)' '{PROJ}/.env' | head -6",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"chmod +x '{remote_bot}' && bash '{remote_bot}'",
                 "sleep 10",
                 "pgrep -af 'start_bot|trading-core' || true",
@@ -420,7 +433,7 @@ print("patched", len(updates), "keys")
             rc = 0
             for step in steps:
                 r = run(client, step, timeout=3600)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return rc
 
@@ -491,7 +504,7 @@ print("patched", len(updates), "keys")
                 env_patch,
                 f"grep -E '^(PAPER_MODE|LIH_ENABLED|LIVE_LIH|LIVE_DH|RISK_MAX)' '{PROJ}/.env' | head -10",
                 f"cd '{PROJ}' && .venv/bin/pip install -q -r requirements.txt",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"chmod +x '{remote_bot}' && bash '{remote_bot}'",
                 "sleep 10",
                 "pgrep -af 'start_bot|trading-core' || true",
@@ -509,7 +522,7 @@ print("patched", len(updates), "keys")
             rc = 0
             for step in steps:
                 r = run(client, step, timeout=3600)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return rc
 
@@ -788,7 +801,7 @@ print("patched", len(updates), "keys")
             steps = [
                 env_patch,
                 f"grep -E '^(PAPER_MODE|HTTP_BIND|DH_ENABLE_15M|BOT_API_TOKEN|LIVE_LIH)' '{PROJ}/.env' | head -8",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"chmod +x '{PROJ}/server_start_bot.sh' && bash '{PROJ}/server_start_bot.sh'",
                 "sleep 8",
                 "ss -tlnp | grep -E ':8080|:8081' || true",
@@ -800,7 +813,7 @@ print("patched", len(updates), "keys")
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -854,7 +867,7 @@ print("patched", len(updates), "keys")
                 sftp.put(str(local), remote)
             sftp.close()
             steps = [
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"bash '{PROJ}/server_start_bot.sh'",
                 "sleep 15",
                 f"grep -E 'Python CLOB bridge|LIH dry-run|LIVE EXEC|Bridge fill|Invalid order' '{PROJ}/bot.log' | tail -15",
@@ -1017,7 +1030,7 @@ print("patched", len(updates), "keys")
                 "pkill -f start_bot.py || true",
                 "sleep 2",
                 f"cd '{PROJ}' && .venv/bin/python scripts/prune_live_lih.py",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"chmod +x '{PROJ}/server_start_bot.sh' && bash '{PROJ}/server_start_bot.sh'",
                 "sleep 15",
                 "pgrep -af 'start_bot|trading-core' || true",
@@ -1029,7 +1042,7 @@ print("patched", len(updates), "keys")
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1100,7 +1113,7 @@ print("patched", len(updates), "keys")
                 "pkill -f start_bot.py || true",
                 "sleep 2",
                 f"cd '{PROJ}' && .venv/bin/python scripts/live_lih_reconcile.py",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"chmod +x '{PROJ}/server_start_bot.sh' && bash '{PROJ}/server_start_bot.sh'",
                 "sleep 15",
                 "pgrep -af 'start_bot|trading-core' || true",
@@ -1114,7 +1127,7 @@ print("patched", len(updates), "keys")
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1151,7 +1164,7 @@ print("patched", len(updates), "keys")
             sftp.close()
             steps = [
                 f"cd '{PROJ}' && .venv/bin/python scripts/live_lih_reconcile.py",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"chmod +x '{PROJ}/server_start_bot.sh' && bash '{PROJ}/server_start_bot.sh'",
                 "sleep 15",
                 f"grep -E 'Live LIH state|open_lih|LEG1|rebalance|Bridge fill' '{PROJ}/bot.log' | tail -25",
@@ -1163,7 +1176,7 @@ print("patched", len(updates), "keys")
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1235,7 +1248,7 @@ print("patched", len(updates), "keys")
                 env_patch,
                 f"grep -E '^(PAPER_MODE|LIVE_LIH|BOT_API_TOKEN|LIVE_STATE)' '{PROJ}/.env' | head -10",
                 f"grep BOT_API_TOKEN '{PROJ}/web.env' 2>/dev/null | head -1 || echo 'web.env: no BOT_API_TOKEN yet'",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"chmod +x '{PROJ}/server_start_bot.sh' && bash '{PROJ}/server_start_bot.sh'",
                 "sleep 10",
                 "curl -s http://127.0.0.1:8081/api/clob/trades?limit=3 | python3 -c "
@@ -1252,7 +1265,7 @@ print("patched", len(updates), "keys")
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1282,7 +1295,7 @@ print("patched", len(updates), "keys")
             steps = [
                 env_patch,
                 f"grep -E 'LIH_.*COOLDOWN' '{PROJ}/.env'",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"bash '{PROJ}/server_start_bot.sh'",
                 "sleep 8",
                 f"grep 'leg1_cd=' '{PROJ}/logs/bridge.log' | tail -3",
@@ -1293,7 +1306,7 @@ print("patched", len(updates), "keys")
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1315,14 +1328,14 @@ print("patched", len(updates), "keys")
                 f"grep -q '^LIH_COOLDOWN_SECONDS=' '{PROJ}/.env' && "
                 f"sed -i 's/^LIH_COOLDOWN_SECONDS=.*/LIH_COOLDOWN_SECONDS=20/' '{PROJ}/.env' || "
                 f"echo 'LIH_COOLDOWN_SECONDS=20' >> '{PROJ}/.env'",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"bash '{PROJ}/server_start_bot.sh'",
                 "sleep 8",
                 f"grep -E 'LIH_COOLDOWN|LIH dry-run' '{PROJ}/.env' '{PROJ}/logs/bridge.log' 2>/dev/null | tail -5",
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1405,7 +1418,7 @@ print("patched", len(updates), "keys")
                 "r=clear_live_trades_history(); print('cleared', r)\"",
                 f"grep '^LIVE_TRADES_BASELINE_TS=' '{PROJ}/.env'",
                 f"ls -la '{PROJ}/logs/live_state.json' 2>/dev/null || echo 'live_state removed'",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"bash '{PROJ}/server_start_bot.sh'",
                 "sleep 10",
                 f"export NEXTAUTH_URL=http://{HOST}:3001 && bash '{PROJ}/server_start_web.sh'",
@@ -1420,7 +1433,7 @@ print("patched", len(updates), "keys")
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1506,7 +1519,7 @@ print("patched", len(updates), "keys")
             steps = [
                 env_patch,
                 f"grep -E '^(PAPER_MODE|LIVE_LIH|LIH_MAX_USDC|PRELIVE_LOG|LIH_LEG1_COOLDOWN|RISK_MAX)' '{PROJ}/.env' | head -12",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"bash '{PROJ}/server_start_bot.sh'",
                 "sleep 12",
                 f"cd '{PROJ}' && .venv/bin/python start_bot.py --preflight-only",
@@ -1517,7 +1530,7 @@ print("patched", len(updates), "keys")
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1593,14 +1606,14 @@ print("patched", len(updates), "keys")
                 "pkill -f trading-core || true",
                 "pkill -f start_bot.py || true",
                 "sleep 2",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"bash '{PROJ}/server_start_bot.sh'",
                 "sleep 12",
                 f"grep 'LIH config' '{PROJ}/bot.log' | tail -1",
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1638,10 +1651,8 @@ print("patched", len(updates), "keys")
                 sftp.put(str(local), remote)
             sftp.close()
             steps = [
-                "pkill -9 -f build.sh 2>/dev/null || true",
-                "pkill -9 -f ninja 2>/dev/null || true",
-                "pkill -9 -f cc1plus 2>/dev/null || true",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                KILL_STALE_BUILD,
+                BUILD_VPS,
                 f"test -x '{PROJ}/build/trading-core' && ls -la '{PROJ}/build/trading-core'",
                 "pgrep -af 'trading-core|start_bot' || echo BOT_NOT_RUNNING_OK",
                 f"test -f '{PROJ}/logs/STOP_TRADING' && echo STOP_FLAG=present || echo STOP_FLAG=missing",
@@ -1649,7 +1660,7 @@ print("patched", len(updates), "keys")
             ]
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 
@@ -1707,7 +1718,7 @@ print("patched", len(updates), "keys")
                 "pkill -f trading-core || true",
                 "pkill -f start_bot.py || true",
                 "sleep 2",
-                f"cd '{PROJ}' && chmod +x build.sh && ./build.sh",
+                BUILD_VPS,
                 f"bash '{PROJ}/server_start_bot.sh'",
                 "sleep 15",
                 f"printf '%s' '{{\"control\":\"pause\",\"reason\":\"awaiting manual resume after deploy\"}}' "
@@ -1726,7 +1737,7 @@ print("patched", len(updates), "keys")
             ])
             for step in steps:
                 r = run(client, step, timeout=1800)
-                if r != 0 and "./build.sh" in step:
+                if r != 0 and ("build.sh" in step or "build-lowmem" in step):
                     return r
             return 0
 

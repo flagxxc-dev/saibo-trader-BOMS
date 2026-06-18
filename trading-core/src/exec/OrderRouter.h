@@ -138,6 +138,8 @@ private:
         double exec_px,
         double shares,
         double now_sec);
+    void abandon_lih_pending(const LihPendingFill& pending, const char* reason);
+    bool lih_pending_position_gone(const LihPendingFill& pending) const;
     
     std::unique_ptr<EIP712Signer> signer_;
     std::unique_ptr<EIP712Signer> signer_neg_risk_;

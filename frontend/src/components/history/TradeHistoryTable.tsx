@@ -66,7 +66,7 @@ export function TradeHistoryTable({ records, emptyText }: { records: TradeRecord
             const hedge = isHedgeTrade(r.strategy) || (r.yesEntryPrice != null && r.noEntryPrice != null);
             const entryDetail =
               hedge && r.yesEntryPrice && r.noEntryPrice
-                ? `Y${r.yesEntryPrice.toFixed(3)}/N${r.noEntryPrice.toFixed(3)}`
+                ? `Y${r.yesEntryPrice.toFixed(2)}/N${r.noEntryPrice.toFixed(2)}`
                 : r.entryPrice.toFixed(4);
             const exitDetail =
               hedge && r.yesExitPrice != null && r.noExitPrice != null && !isOpen
@@ -127,7 +127,9 @@ export function TradeHistoryTable({ records, emptyText }: { records: TradeRecord
                   {isOpen ? (
                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-bold">持仓中</span>
                   ) : (
-                    <span className="text-[9px] text-white/40">{r.exitReason || "已平仓"}</span>
+                    <span className="text-[9px] text-white/40">
+                      {r.exitReason === "CLOB_FILL" ? "CLOB成交" : r.exitReason || "已平仓"}
+                    </span>
                   )}
                 </td>
               </tr>

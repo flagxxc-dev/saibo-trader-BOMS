@@ -57,6 +57,19 @@ export function mergeTradeHistory(
 ): TradeRecord[] {
   const afterBaseline = (ts: number) => baselineTs <= 0 || ts <= 0 || ts >= baselineTs;
   const filteredBot = botRecords.filter((r) => afterBaseline(r.closedAt || r.openedAt || 0));
+  // Bot already has LIH round records — raw CLOB leg fills are redundant (+$0 CLOB_FILL noise).
+  const hasLihClosed = filteredBot.some(
+    (r) => r.strategy === "LIH" && r.status === "closed" && r.exitReason !== "CLOB_FILL"
+  );
+  if (hasLihClosed) {
+    const sorted = [...filteredBot].filter((r) => r.exitReason !== "CLOB_FILL");
+    sorted.sort((a, b) => {
+      const ta = a.closedAt || a.openedAt || 0;
+      const tb = b.closedAt || b.openedAt || 0;
+      return tb - ta;
+    });
+    return sorted;
+  }
   const byId = new Map<string, TradeRecord>();
   for (const r of filteredBot) {
     byId.set(r.id, r);

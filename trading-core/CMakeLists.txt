@@ -6,9 +6,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(TRADING_CORE_LOWMEM "Low-RAM build: -O2, no LTO (for ~1GB VPS)" OFF)
+
 # Compiler flags for performance and strict warnings
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -flto -Wall -Wextra -Wpedantic -Wno-unused-parameter")
+    if(TRADING_CORE_LOWMEM)
+        message(STATUS "TRADING_CORE_LOWMEM=ON: -O2, no LTO (VPS safe build)")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -Wall -Wextra -Wpedantic -Wno-unused-parameter")
+    else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -flto -Wall -Wextra -Wpedantic -Wno-unused-parameter")
+    endif()
 endif()
 
 # Find dependencies provided by Conan

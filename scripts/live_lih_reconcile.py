@@ -62,6 +62,10 @@ def _legs_from_trades(trades: list[dict], *, now: float) -> list[dict]:
         asset = (asset or "").lower()
         if not asset or asset == "—" or window not in (5, 15):
             continue
+        ts = float(t.get("timestamp") or 0)
+        win_min = int(window)
+        if ts > 0 and now > ts + win_min * 60 + 120:
+            continue
         leg = _outcome_side(str(t.get("outcome") or ""))
         if not leg:
             continue

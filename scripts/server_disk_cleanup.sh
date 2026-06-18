@@ -1,5 +1,6 @@
 #!/bin/bash
 # Free disk on small Vultr instances. Safe for polymarket-bot-only deployments.
+# For scheduled threshold cleanup (95%), use scripts/disk_guard.sh + install_disk_guard_cron.sh
 set -euo pipefail
 
 echo "=== before ==="

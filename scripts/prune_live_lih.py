@@ -43,12 +43,17 @@ def prune_live_state(path: Path | None = None, *, grace_sec: float = 30.0) -> in
             continue
         title = str(pos.get("market_question") or "")
         end_ts = float(pos.get("end_date_ts") or 0)
+        opened_at = float(pos.get("opened_at") or 0)
+        win_min = int(pos.get("window_minutes") or 5)
         if end_ts <= 0:
             parsed = parse_market_end_ts(title, ref_ts=now)
             if parsed:
                 end_ts = parsed
                 pos["end_date_ts"] = end_ts
-        if end_ts > 0 and now > end_ts + grace_sec:
+        stale_by_open = opened_at > 0 and now > opened_at + win_min * 60 + grace_sec
+        bogus_end = end_ts > now + 86400
+        expired = (end_ts > 0 and now > end_ts + grace_sec) or stale_by_open or bogus_end
+        if expired:
             pos = dict(pos)
             pos["closed_at"] = now
             pos["exit_reason"] = "expired (pruned)"

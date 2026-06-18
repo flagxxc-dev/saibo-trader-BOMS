@@ -267,7 +267,9 @@ export function TradingPanels({ liveState }: { liveState: LiveState }) {
                   l.includes("CLOSED") ||
                   l.includes("FILLED") ||
                   l.includes("OPENED") ||
-                  l.includes("BALANCE")
+                  l.includes("BALANCE") ||
+                  l.includes("pending") ||
+                  l.includes("awaiting")
               )}
               emptyText="等待成交记录..."
             />

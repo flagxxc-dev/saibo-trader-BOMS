@@ -82,6 +82,9 @@ struct LegInHedgePosition {
     double no_shares = 0.0;
     double yes_cost = 0.0;
     double no_cost = 0.0;
+    /** Weighted-average fill price per leg (excludes fees; matches exchange display). */
+    double yes_entry_price = 0.0;
+    double no_entry_price = 0.0;
     double opened_at = 0.0;
     double end_date_ts = 0.0;
     int window_minutes = 5;
@@ -192,12 +195,16 @@ public:
     /** Drop all in-memory open LIH rounds (shadow reset / bad reconcile cleanup). */
     void clear_open_lih_positions();
     void clear_closed_lih_positions();
+    /** Merge split single-leg closed LIH rows (e.g. -recon orphans) into one hedged record. */
+    void consolidate_closed_lih_positions();
     void set_lih_pause_after_round(bool v);
     bool get_lih_pause_after_round() const;
     /** Minimum wallet USDC before opening a new LIH leg1 (0 = off). */
     void set_lih_min_balance_usdc(double v);
     double get_lih_min_balance_usdc() const;
 
+    /** True if LEG1 CLOB submit is in-flight for asset+window (not open position). */
+    bool lih_leg1_inflight_only(const std::string& asset, int window_minutes) const;
     /** True if an open LIH round or in-flight LEG1 exists for asset+window. */
     bool lih_has_open_or_inflight(const std::string& asset, int window_minutes) const;
     /** Reserve LEG1 slot before CLOB submit; prevents duplicate live orders per tick/restart race. */
@@ -208,6 +215,8 @@ public:
     /** Reserve rebalance slot before CLOB submit; one in-flight order per lih_id. */
     bool try_begin_lih_rebalance(const std::string& lih_id);
     void end_lih_rebalance_inflight(const std::string& lih_id);
+    /** Drop stale leg1/rebalance locks so the next round can enter cleanly. */
+    void scrub_lih_inflight_locks(double now_sec);
     std::unordered_map<std::string, LegInHedgePosition> get_open_lih_positions() const;
     LegInHedgePosition register_lih_open_leg1(
         const trading::MarketInfo& market, bool buy_yes, double price, double shares, double now_sec,
@@ -265,9 +274,9 @@ public:
     // Flat-close any open LA positions left from older sessions (strategy removed).
     int close_legacy_la_positions();
 
-    // Paper mode persistence (JSON snapshot)
-    boost::json::object export_paper_state() const;
-    bool import_paper_state(const boost::json::object& doc);
+    /** Drop paper/shadow positions and ephemeral LIH locks (live-only startup). */
+    void purge_paper_positions();
+
     boost::json::object export_live_lih_state() const;
     bool import_live_lih_state(const boost::json::object& doc);
 
@@ -312,6 +321,7 @@ private:
 
     std::unordered_map<std::string, LegInHedgePosition> open_lih_positions_;
     std::unordered_set<std::string> lih_leg1_inflight_;
+    std::unordered_map<std::string, double> lih_leg1_inflight_since_;
     std::unordered_set<std::string> lih_rebalance_inflight_;
     std::vector<LegInHedgePosition> closed_lih_positions_;
     int total_lih_trades_ = 0;
