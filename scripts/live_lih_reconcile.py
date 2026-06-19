@@ -386,6 +386,35 @@ def main() -> int:
                 lih_id = matched
 
         fresh_ids.add(lih_id)
+        if args.merge and lih_id in open_lih:
+            ex = open_lih[lih_id]
+            ex_yes = float(ex.get("yes_shares") or 0)
+            ex_no = float(ex.get("no_shares") or 0)
+            ex_yc = float(ex.get("yes_cost") or 0)
+            ex_nc = float(ex.get("no_cost") or 0)
+            # Never wipe a hedged leg: activity rows may only show the latest BUY.
+            row_yes = float(row["yes_shares"])
+            row_no = float(row["no_shares"])
+            row_yc = float(row["yes_cost"])
+            row_nc = float(row["no_cost"])
+            if row_yes < ex_yes - 1e-6:
+                row_yes, row_yc = ex_yes, ex_yc
+            if row_no < ex_no - 1e-6:
+                row_no, row_nc = ex_no, ex_nc
+            if row_yes > ex_yes + 1e-6:
+                ex_yes, ex_yc = row_yes, row_yc
+            if row_no > ex_no + 1e-6:
+                ex_no, ex_nc = row_no, row_nc
+            row = dict(row)
+            row["yes_shares"] = ex_yes
+            row["no_shares"] = ex_no
+            row["yes_cost"] = ex_yc
+            row["no_cost"] = ex_nc
+            row["yes_token_id"] = row.get("yes_token_id") or ex.get("yes_token_id") or ""
+            row["no_token_id"] = row.get("no_token_id") or ex.get("no_token_id") or ""
+            total_cost = row["yes_cost"] + row["no_cost"]
+            yes_avg = row["yes_cost"] / row["yes_shares"] if row["yes_shares"] > 0 else 0.0
+            no_avg = row["no_cost"] / row["no_shares"] if row["no_shares"] > 0 else 0.0
         pos = {
             "lih_id": lih_id,
             "asset": row["asset"],
@@ -400,7 +429,9 @@ def main() -> int:
             "entry_fees": total_cost * 0.018,
             "opened_at": row["opened_at"] or now,
             "end_date_ts": row["end_date_ts"] or 0.0,
-            "rebalance_count": 0,
+            "rebalance_count": int((open_lih.get(lih_id) or {}).get("rebalance_count") or 0)
+            if args.merge and lih_id in open_lih
+            else 0,
             "is_neg_risk": False,
             "paper_mode": False,
             "is_shadow": False,
