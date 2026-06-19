@@ -9,9 +9,8 @@ Git 以 commit hash 为准；语义版本便于口头对齐。
 
 | 项 | 值 |
 |---|---|
-| **Git** | _(pending)_ — `feat: LIH endgame batch hedge, hold on-trend, soft cap` |
-| **上一基线** | `v0.9.0-lih-baseline` @ `0268601` |
-| **VPS** | 部署后更新 |
+| **Git** | `9b9c706` — `feat: LIH endgame batch hedge with soft cap and on-trend hold` |
+| **VPS** | `70.34.221.132` — 已部署；**暂停中**（`STOP_TRADING`） |
 
 ---
 
