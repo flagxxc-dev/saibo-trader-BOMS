@@ -1,35 +1,30 @@
-# Polymarket LIH Bot — C++ 交易核心
+# Polymarket LIH Bot — Trend-First（顺势买贵腿）
 
-Polymarket **5m / 15m Up-Down** 市场（BTC / ETH / SOL）自动交易。主策略 **LIH（Leg-In Hedge）**：先买便宜边，再对冲到目标合价。
+Polymarket **5m / 15m Up-Down** 自动交易。本仓库默认 **顺势 leg1**：Binance 涨买 YES / 跌买 NO（ask ≤ 0.65），再对冲到合价 ≤0.94。
+
+与 cheap-leg 主仓库：[`saibo-trader`](https://github.com/TrendHunter/saibo-trader)（`LIH_LEG1_MODE=cheap`）。
 
 [![C++](https://img.shields.io/badge/C++-20-blue)](https://isocpp.org)
 [![Polygon](https://img.shields.io/badge/Network-Polygon-purple)](https://polygon.technology)
 
-> 遗留 **Dump Hedge** 已归档：[`archive/dh-only/`](archive/dh-only/)（设 `LIH_ENABLED=false` 可恢复 DH-only）。
-
 ---
 
-## 策略逻辑（一局）— **Cheap-Leg 模式**（VPS 默认）
-
-> 顺势买贵腿模式：[`saibo-trader-trend`](https://github.com/TrendHunter/saibo-trader-trend) 或 `LIH_LEG1_MODE=trend`（见 [`README_TREND.md`](README_TREND.md)）。
+## 策略逻辑（一局）— Trend 模式
 
 ```
-开盘 +7s → leg1 便宜腿(≤0.45)+趋势过滤 → 利润对冲(≤0.94) → 末段配平 → 结算/redeem
+开盘 +7s → leg1 顺势一侧(≤0.65) → 利润对冲(≤0.94) → 末段配平 → 结算/redeem
 ```
 
 | 阶段 | 条件 | 说明 |
 |------|------|------|
-| **开局延迟** | 开盘后 `LIH_LEG1_START_DELAY_SEC=7` | 前 7 秒 **不买**，等波动；7 秒后可买，**非强制** |
-| **Leg1** | ask ≤ `LIH_LEG1_MAX_PRICE`（0.45）+ `LIH_LEG1_TREND_ALIGN` | 买更便宜一侧；逆势则跳过 |
-| **利润对冲** | `heavy_avg + light_ask ≤ LIH_TARGET_COMBINED`（**0.94**） | 买对面配平 |
-| **末段 T≤100s** | 有 gap | 5/10 份分批补缺腿；合价软顶 **1.15** |
-| **末段 hold** | 持有腿 ask **≥0.90** 且 Binance **顺势** | 不配平，等结算；跌回 **<0.89** 或逆势 → 继续对冲 |
-| **末段 T≤50s** | override | 可 **突破 1.15** 关 gap；拒单后 **2s** 再试 |
-| **结算** | 市场到期 | `AUTO_REDEEM=true` 链上 redeem |
+| **开局延迟** | `LIH_LEG1_START_DELAY_SEC=7` | 前 7 秒不买 |
+| **Leg1 trend** | `LIH_LEG1_MODE=trend` | Binance 顺势；ask ≤ `LIH_LEG1_TREND_MAX_PRICE`（0.65） |
+| **利润对冲** | 合价 ≤ **0.94** | 买对面配平 |
+| **末段 T≤100s** | 有 gap | 5/10 份补缺腿；软顶 1.15 |
+| **Hold** | 持有腿 ≥0.90 且顺势 | 等结算；&lt;0.89 或逆势 → 对冲 |
+| **T≤50s** | override | 突破 1.15；拒单 **2s** 重试 |
 
-保守实盘：单槽、`LIH_ONE_SLOT_GLOBAL`、余额 &lt; $10 不开 leg1、窗口最后 30s 不开新 leg1；**重启默认 PAUSED**，Web Resume 才交易。
-
-**Leg1 模式**：`LIH_LEG1_MODE=cheap`（本仓库 VPS 默认）。顺势买贵腿见 [`saibo-trader-trend`](https://github.com/TrendHunter/saibo-trader-trend) 或本地设 `LIH_LEG1_MODE=trend`（详见 [`README_TREND.md`](README_TREND.md)）。
+重启默认 **PAUSED**；Web Resume 才交易。Cheap-leg 见主仓库。
 
 **版本留档**：见 [`docs/LIH_VERSION.md`](docs/LIH_VERSION.md)（当前 `v0.10.0-endgame`）。
 
