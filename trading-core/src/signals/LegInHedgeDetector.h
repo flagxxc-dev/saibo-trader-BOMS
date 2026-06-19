@@ -40,6 +40,8 @@ public:
                        double flex_dilute_ratio = 0.95,
                        bool leg1_trend_align = false,
                        double trend_lookback_sec = 60.0,
+                       bool leg1_trend_mode = false,
+                       double leg1_trend_max_price = 0.65,
                        double endgame_secs = 100.0,
                        double endgame_hold_ask = 0.90,
                        double endgame_resume_hedge_ask = 0.89,
@@ -71,6 +73,8 @@ public:
     void set_flex_dilute_ratio(double v) { flex_dilute_ratio_ = v; }
     void set_leg1_trend_align(bool v) { leg1_trend_align_ = v; }
     void set_trend_lookback_sec(double v) { trend_lookback_sec_ = v; }
+    void set_leg1_trend_mode(bool v) { leg1_trend_mode_ = v; }
+    void set_leg1_trend_max_price(double v) { leg1_trend_max_price_ = v; }
     void set_endgame_secs(double v) { endgame_secs_ = v; }
     void set_endgame_hold_ask(double v) { endgame_hold_ask_ = v; }
     void set_endgame_resume_hedge_ask(double v) { endgame_resume_hedge_ask_ = v; }
@@ -124,6 +128,8 @@ private:
     double flex_dilute_ratio_;
     bool leg1_trend_align_;
     double trend_lookback_sec_;
+    bool leg1_trend_mode_;
+    double leg1_trend_max_price_;
     double endgame_secs_;
     double endgame_hold_ask_;
     double endgame_resume_hedge_ask_;

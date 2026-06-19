@@ -838,6 +838,20 @@ static void apply_runtime_config(
                     std::lock_guard<std::mutex> lock(detector_mutex);
                     if (lih_detector) lih_detector->set_leg1_trend_align(enabled);
                     store.push_telemetry(fmt::format("CONFIG LIH_LEG1_TREND_ALIGN={}", enabled ? "true" : "false"));
+                } else if (k == "LIH_LEG1_MODE") {
+                    std::string mode = v;
+                    std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+                    const bool trend = (mode == "trend" || mode == "expensive");
+                    store.set_lih_leg1_mode(trend ? "trend" : "cheap");
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_leg1_trend_mode(trend);
+                    store.push_telemetry(fmt::format("CONFIG LIH_LEG1_MODE={}", trend ? "trend" : "cheap"));
+                } else if (k == "LIH_LEG1_TREND_MAX_PRICE") {
+                    const double x = std::stod(v);
+                    store.set_lih_leg1_trend_max_price(x);
+                    std::lock_guard<std::mutex> lock(detector_mutex);
+                    if (lih_detector) lih_detector->set_leg1_trend_max_price(x);
+                    store.push_telemetry(fmt::format("CONFIG LIH_LEG1_TREND_MAX_PRICE={}", v));
                 } else if (k == "LIH_TREND_LOOKBACK_SEC") {
                     const double x = std::stod(v);
                     std::lock_guard<std::mutex> lock(detector_mutex);
@@ -1073,6 +1087,10 @@ int main() {
         bool lih_leg1_trend_align = env_flag_true(env, "LIH_LEG1_TREND_ALIGN", false);
         double lih_trend_lookback_sec = env.count("LIH_TREND_LOOKBACK_SEC")
             ? std::stod(env["LIH_TREND_LOOKBACK_SEC"]) : 60.0;
+        std::string lih_leg1_mode = env.count("LIH_LEG1_MODE") ? env["LIH_LEG1_MODE"] : "cheap";
+        std::transform(lih_leg1_mode.begin(), lih_leg1_mode.end(), lih_leg1_mode.begin(), ::tolower);
+        const bool lih_leg1_trend_mode = (lih_leg1_mode == "trend" || lih_leg1_mode == "expensive");
+        double lih_leg1_trend_max = env_double_or(env, "LIH_LEG1_TREND_MAX_PRICE", 0.65);
         double lih_endgame_secs = env.count("LIH_ENDGAME_SECS")
             ? std::stod(env["LIH_ENDGAME_SECS"]) : 100.0;
         double lih_endgame_hold_ask = env_double_or(env, "LIH_ENDGAME_HOLD_ASK", 0.90);
@@ -1140,12 +1158,14 @@ int main() {
                 ? fmt::format("${:.2f}", lih_max_usdc_per_slot)
                 : "balance×pos_frac";
             spdlog::info(
-                "LIH config | leg1<={:.2f} target<={:.2f} entry={:.1f} leg1_delay={:.0f}s mode={} dilute={:.2f} "
+                "LIH config | leg1_mode={} leg1<={:.2f} trend_max<={:.2f} target<={:.2f} entry={:.1f} "
+                "leg1_delay={:.0f}s mode={} dilute={:.2f} "
                 "leg1_min={:.0f}s hedge_min={:.0f}s force={:.0f}s trend_align={} lookback={:.0f}s "
                 "endgame={:.0f}s hold>={:.2f} soft_cap={:.2f} step={:.0f}/{:.0f} override={:.0f}s "
                 "leg1_cd={} rebal_cd={} max_rebal_sh={} max_matched_sh={} slot_cap={} "
                 "pause_after_round={} session_legs={}",
-                lih_leg1_max, lih_target_combined, lih_leg1_shares, lih_leg1_start_delay,
+                lih_leg1_trend_mode ? "trend" : "cheap",
+                lih_leg1_max, lih_leg1_trend_max, lih_target_combined, lih_leg1_shares, lih_leg1_start_delay,
                 lih_flex_rebalance ? "flex" : "standard",
                 lih_flex_dilute_ratio,
                 lih_leg1_min_secs, lih_min_secs,
@@ -1258,6 +1278,8 @@ int main() {
         store.set_lih_enabled(lih_enabled);
         store.set_lih_disable_dh(lih_enabled);
         store.set_lih_config(lih_leg1_max, lih_target_combined, lih_use_mirror);
+        store.set_lih_leg1_mode(lih_leg1_trend_mode ? "trend" : "cheap");
+        store.set_lih_leg1_trend_max_price(lih_leg1_trend_max);
         store.set_live_lih_dry_run(live_lih_dry_run);
         store.set_mirror_path(mirror_path);
         if (env.count("LIVE_TRADES_BASELINE_TS")) {
@@ -1532,6 +1554,7 @@ int main() {
                             lih_force_balance_secs, lih_max_rebalance_shares,
                             lih_flex_rebalance, lih_flex_dilute_ratio,
                             lih_leg1_trend_align, lih_trend_lookback_sec,
+                            lih_leg1_trend_mode, lih_leg1_trend_max,
                             lih_endgame_secs, lih_endgame_hold_ask, lih_endgame_resume_hedge_ask,
                             lih_endgame_soft_cap, lih_endgame_step_small, lih_endgame_step_large,
                             lih_endgame_gap_large, lih_endgame_override_secs,

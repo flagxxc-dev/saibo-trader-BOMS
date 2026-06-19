@@ -11,7 +11,7 @@ Polymarket **5m / 15m Up-Down** 市场（BTC / ETH / SOL）自动交易。主策
 
 ## 策略逻辑（一局）— **Cheap-Leg 模式**（VPS 默认）
 
-> 顺势买贵腿模式见独立仓库 [`saibo-trader-trend`](https://github.com/TrendHunter/saibo-trader-trend)（`LIH_LEG1_MODE=trend`）。
+> 顺势买贵腿模式：[`saibo-trader-trend`](https://github.com/TrendHunter/saibo-trader-trend) 或 `LIH_LEG1_MODE=trend`（见 [`README_TREND.md`](README_TREND.md)）。
 
 ```
 开盘 +7s → leg1 便宜腿(≤0.45)+趋势过滤 → 利润对冲(≤0.94) → 末段配平 → 结算/redeem
@@ -28,6 +28,8 @@ Polymarket **5m / 15m Up-Down** 市场（BTC / ETH / SOL）自动交易。主策
 | **结算** | 市场到期 | `AUTO_REDEEM=true` 链上 redeem |
 
 保守实盘：单槽、`LIH_ONE_SLOT_GLOBAL`、余额 &lt; $10 不开 leg1、窗口最后 30s 不开新 leg1；**重启默认 PAUSED**，Web Resume 才交易。
+
+**Leg1 模式**：`LIH_LEG1_MODE=cheap`（本仓库 VPS 默认）。顺势买贵腿见 [`saibo-trader-trend`](https://github.com/TrendHunter/saibo-trader-trend) 或本地设 `LIH_LEG1_MODE=trend`（详见 [`README_TREND.md`](README_TREND.md)）。
 
 **版本留档**：见 [`docs/LIH_VERSION.md`](docs/LIH_VERSION.md)（当前 `v0.10.0-endgame`）。
 

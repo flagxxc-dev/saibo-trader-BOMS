@@ -172,6 +172,10 @@ public:
     }
     double lih_leg1_max_price() const { return lih_leg1_max_price_; }
     double lih_target_combined() const { return lih_target_combined_; }
+    void set_lih_leg1_mode(const std::string& mode) { lih_leg1_mode_ = mode; }
+    bool lih_leg1_trend_mode() const { return lih_leg1_mode_ == "trend"; }
+    void set_lih_leg1_trend_max_price(double v) { lih_leg1_trend_max_price_ = v; }
+    double lih_leg1_trend_max_price() const { return lih_leg1_trend_max_price_; }
     void set_live_lih_dry_run(bool v) { live_lih_dry_run_ = v; }
     bool live_lih_dry_run() const { return live_lih_dry_run_; }
     void set_trades_baseline_ts(double ts) { trades_baseline_ts_ = ts; }
@@ -213,6 +217,8 @@ private:
     bool lih_disable_dh_ = false;
     double lih_leg1_max_price_ = 0.45;
     double lih_target_combined_ = 0.94;
+    std::string lih_leg1_mode_ = "cheap";
+    double lih_leg1_trend_max_price_ = 0.65;
     bool lih_use_mirror_ = true;
     bool live_lih_dry_run_ = true;
     double trades_baseline_ts_ = 0.0;

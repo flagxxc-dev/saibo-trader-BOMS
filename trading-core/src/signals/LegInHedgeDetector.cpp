@@ -31,6 +31,8 @@ LegInHedgeDetector::LegInHedgeDetector(StateStore& store,
                                        double flex_dilute_ratio,
                                        bool leg1_trend_align,
                                        double trend_lookback_sec,
+                                       bool leg1_trend_mode,
+                                       double leg1_trend_max_price,
                                        double endgame_secs,
                                        double endgame_hold_ask,
                                        double endgame_resume_hedge_ask,
@@ -58,6 +60,8 @@ LegInHedgeDetector::LegInHedgeDetector(StateStore& store,
       flex_dilute_ratio_(flex_dilute_ratio),
       leg1_trend_align_(leg1_trend_align),
       trend_lookback_sec_(trend_lookback_sec),
+      leg1_trend_mode_(leg1_trend_mode),
+      leg1_trend_max_price_(leg1_trend_max_price),
       endgame_secs_(endgame_secs),
       endgame_hold_ask_(endgame_hold_ask),
       endgame_resume_hedge_ask_(endgame_resume_hedge_ask),
@@ -317,18 +321,42 @@ std::optional<LegInAction> LegInHedgeDetector::evaluate(double now_ms, risk::Ris
             //     log_entry_status(market, key, now_sec, q, "session leg cap");
             //     continue;
             // }
-            const bool yes_cheap = q.yes <= leg1_max_price_ + kFloatTol;
-            const bool no_cheap = q.no <= leg1_max_price_ + kFloatTol;
-            if (!yes_cheap && !no_cheap) {
-                log_entry_status(market, key, now_sec, q, "no cheap leg");
-                continue;
+            bool pick_yes = false;
+            const char* entry_tag = "entry";
+
+            if (leg1_trend_mode_) {
+                const bool yes_trend = spot_trend_favors(market, true);
+                const bool no_trend = spot_trend_favors(market, false);
+                if (yes_trend && no_trend) {
+                    log_entry_status(market, key, now_sec, q, "trend ambiguous");
+                    continue;
+                }
+                if (!yes_trend && !no_trend) {
+                    log_entry_status(market, key, now_sec, q, "no clear trend");
+                    continue;
+                }
+                pick_yes = yes_trend;
+                const double trend_px = pick_yes ? q.yes : q.no;
+                if (trend_px > leg1_trend_max_price_ + kFloatTol) {
+                    log_entry_status(market, key, now_sec, q, "trend leg above max");
+                    continue;
+                }
+                entry_tag = q.from_mirror ? "mirror-trend" : "trend-entry";
+            } else {
+                const bool yes_cheap = q.yes <= leg1_max_price_ + kFloatTol;
+                const bool no_cheap = q.no <= leg1_max_price_ + kFloatTol;
+                if (!yes_cheap && !no_cheap) {
+                    log_entry_status(market, key, now_sec, q, "no cheap leg");
+                    continue;
+                }
+                pick_yes = yes_cheap && (!no_cheap || q.yes <= q.no);
+                if (!leg1_trend_allows(market, pick_yes)) {
+                    log_entry_status(market, key, now_sec, q, pick_yes ? "trend blocks YES" : "trend blocks NO");
+                    continue;
+                }
+                entry_tag = q.from_mirror ? "mirror" : "entry";
             }
 
-            const bool pick_yes = yes_cheap && (!no_cheap || q.yes <= q.no);
-            if (!leg1_trend_allows(market, pick_yes)) {
-                log_entry_status(market, key, now_sec, q, pick_yes ? "trend blocks YES" : "trend blocks NO");
-                continue;
-            }
             const double px = pick_yes ? q.yes : q.no;
             double shares = leg1_shares_;
             if (max_matched_cap > kFloatTol) {
@@ -362,7 +390,7 @@ std::optional<LegInAction> LegInHedgeDetector::evaluate(double now_ms, risk::Ris
             act.buy_yes = pick_yes;
             act.price = px;
             act.shares = shares;
-            act.note = q.from_mirror ? "mirror" : "entry";
+            act.note = entry_tag;
             last_leg1_time_[key] = now_sec;
             return act;
         }

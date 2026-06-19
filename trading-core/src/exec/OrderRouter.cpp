@@ -1483,7 +1483,9 @@ bool OrderRouter::submit_lih_action(const trading::LegInAction& act, double now_
 
     const bool is_neg_risk = act.market.is_neg_risk;
     const double target = store_.lih_target_combined();
-    const double leg1_max = store_.lih_leg1_max_price();
+    const double leg1_max = store_.lih_leg1_trend_mode()
+        ? store_.lih_leg1_trend_max_price()
+        : store_.lih_leg1_max_price();
     const char* side_label = act.buy_yes ? "YES" : "NO";
 
     auto shadow = [&](const char* tag, const std::string& detail) {
