@@ -359,7 +359,7 @@ std::optional<LegInAction> LegInHedgeDetector::evaluate(double now_ms, risk::Ris
             return act;
         }
 
-        if (secs_left < min_seconds_remaining_) continue;
+        if (secs_left < min_seconds_remaining_ && secs_left > endgame_secs_) continue;
 
         const auto& pos = *open_lih;
         const double matched = std::min(pos.yes_shares, pos.no_shares);
@@ -428,8 +428,9 @@ std::optional<LegInAction> LegInHedgeDetector::evaluate(double now_ms, risk::Ris
 
             if (in_endgame) {
                 const bool on_trend = spot_trend_favors(market, heavy_yes);
+                // Hold only when clearly winning (≥ hold ask) and on-trend; < resume ask always hedge.
                 const bool hold_win = heavy_ask >= endgame_hold_ask_ - kFloatTol
-                    && heavy_ask >= endgame_resume_hedge_ask_ - kFloatTol
+                    && heavy_ask > endgame_resume_hedge_ask_ + kFloatTol
                     && on_trend;
                 if (hold_win) {
                     std::string msg = fmt::format(
