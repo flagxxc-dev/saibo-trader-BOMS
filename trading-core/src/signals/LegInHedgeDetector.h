@@ -47,8 +47,8 @@ public:
                        double endgame_step_small = 5.0,
                        double endgame_step_large = 10.0,
                        double endgame_gap_large = 10.0,
-                       double endgame_override_secs = 40.0,
-                       double endgame_override_cooldown = 1.0);
+                       double endgame_override_secs = 50.0,
+                       double endgame_override_cooldown = 2.0);
 
     std::optional<LegInAction> evaluate(double now_ms, risk::RiskManager& rm);
 

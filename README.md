@@ -9,21 +9,25 @@ Polymarket **5m / 15m Up-Down** 市场（BTC / ETH / SOL）自动交易。主策
 
 ---
 
-## 策略逻辑（一局）
+## 策略逻辑（一局）— **Cheap-Leg 模式**（VPS 默认）
+
+> 顺势买贵腿模式见独立仓库 [`saibo-trader-trend`](https://github.com/TrendHunter/saibo-trader-trend)（`LIH_LEG1_MODE=trend`）。
 
 ```
-扫描盘口 → leg1（ask ≤ 0.45）→ 登记持仓 → 对冲（heavy_avg + light_ask ≤ 0.95）→ 结算 / 自动 redeem / 自动暂停
+开盘 +7s → leg1 便宜腿(≤0.45)+趋势过滤 → 利润对冲(≤0.94) → 末段配平 → 结算/redeem
 ```
 
 | 阶段 | 条件 | 说明 |
 |------|------|------|
-| **Leg1** | 某侧 ask ≤ `LIH_LEG1_MAX_PRICE`（默认 0.45） | 买 Up 或 Down 中更便宜的一侧 |
-| **对冲** | `已买边均价 + 对面 ask ≤ LIH_TARGET_COMBINED`（默认 **0.95**） | 买对面配平 |
-| **结算** | 市场到期 | `AUTO_REDEEM=true` 时自动链上 redeem |
-| **连续运行** | 默认 `LIH_PAUSE_AFTER_ROUND=false` | 每局结算后自动清零 session，继续等新 leg1 |
-| **单轮调试** | `LIH_PAUSE_AFTER_ROUND=true` + `LIH_SESSION_MAX_LEGS>0` | 需在 `RiskManager.cpp` 取消 DEBUG 注释块后生效；Web「恢复」开下一局 |
+| **开局延迟** | 开盘后 `LIH_LEG1_START_DELAY_SEC=7` | 前 7 秒 **不买**，等波动；7 秒后可买，**非强制** |
+| **Leg1** | ask ≤ `LIH_LEG1_MAX_PRICE`（0.45）+ `LIH_LEG1_TREND_ALIGN` | 买更便宜一侧；逆势则跳过 |
+| **利润对冲** | `heavy_avg + light_ask ≤ LIH_TARGET_COMBINED`（**0.94**） | 买对面配平 |
+| **末段 T≤100s** | 有 gap | 5/10 份分批补缺腿；合价软顶 **1.15** |
+| **末段 hold** | 持有腿 ask **≥0.90** 且 Binance **顺势** | 不配平，等结算；跌回 **<0.89** 或逆势 → 继续对冲 |
+| **末段 T≤50s** | override | 可 **突破 1.15** 关 gap；拒单后 **2s** 再试 |
+| **结算** | 市场到期 | `AUTO_REDEEM=true` 链上 redeem |
 
-保守实盘默认：全局单槽（`LIH_ONE_SLOT_GLOBAL`）、余额低于 $10 不开 leg1、窗口最后 30s 不开新 leg1。
+保守实盘：单槽、`LIH_ONE_SLOT_GLOBAL`、余额 &lt; $10 不开 leg1、窗口最后 30s 不开新 leg1；**重启默认 PAUSED**，Web Resume 才交易。
 
 **版本留档**：见 [`docs/LIH_VERSION.md`](docs/LIH_VERSION.md)（当前 `v0.10.0-endgame`）。
 

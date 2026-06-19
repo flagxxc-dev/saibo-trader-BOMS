@@ -1081,8 +1081,8 @@ int main() {
         double lih_endgame_step_small = env_double_or(env, "LIH_ENDGAME_STEP_SHARES_SMALL", 5.0);
         double lih_endgame_step_large = env_double_or(env, "LIH_ENDGAME_STEP_SHARES_LARGE", 10.0);
         double lih_endgame_gap_large = env_double_or(env, "LIH_ENDGAME_GAP_LARGE", 10.0);
-        double lih_endgame_override_secs = env_double_or(env, "LIH_ENDGAME_OVERRIDE_SECS", 40.0);
-        double lih_endgame_override_cooldown = env_double_or(env, "LIH_ENDGAME_OVERRIDE_COOLDOWN", 1.0);
+        double lih_endgame_override_secs = env_double_or(env, "LIH_ENDGAME_OVERRIDE_SECS", 50.0);
+        double lih_endgame_override_cooldown = env_double_or(env, "LIH_ENDGAME_OVERRIDE_COOLDOWN", 2.0);
         std::string mirror_path = env.count("LIVE_MIRROR_PATH") ? env["LIVE_MIRROR_PATH"] : "logs/live_mirror.json";
 
         const std::string strategy = lih_enabled ? "leg_in" : "dump_hedge";
