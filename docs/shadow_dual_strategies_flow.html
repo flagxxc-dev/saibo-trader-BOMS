@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shadow 双策略完整流程图</title>
+  <style>
+    :root {
+      --bg:#0f1419; --card:#1a2332; --text:#e7ecf3; --muted:#8b9cb3; --accent:#58a6ff; --border:#2d3a4f;
+      --start:#dbeafe; --start-b:#3b82f6; --dec:#fef3c7; --dec-b:#f59e0b;
+      --act:#dcfce7; --act-b:#22c55e; --tag:#fce7f3; --tag-b:#ec4899; --hold:#fee2e2; --hold-b:#ef4444;
+    }
+    * { box-sizing:border-box; }
+    body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text);
+           line-height:1.55; margin:0; padding:20px 16px 80px; }
+    .wrap { max-width:920px; margin:0 auto; }
+    h1 { font-size:1.55rem; }
+    h2 { color:var(--accent); margin-top:40px; padding-top:14px; border-top:1px solid var(--border); font-size:1.15rem; }
+    h3 { color:#c9d7ef; margin-top:22px; font-size:1rem; }
+    .sub { color:var(--muted); font-size:0.88rem; margin:6px 0 20px; }
+    .note { background:var(--card); border-left:4px solid var(--accent); padding:12px 14px; border-radius:0 8px 8px 0;
+            color:#c9d7ef; font-size:0.88rem; margin:14px 0; }
+    .note strong { color:#fff; }
+    code { background:var(--card); padding:1px 5px; border-radius:4px; font-size:0.86em; }
+
+    /* ===== flowchart ===== */
+    .flow { display:flex; flex-direction:column; align-items:center; gap:0; margin:16px 0 28px; }
+    .arr { color:#64748b; font-size:18px; line-height:1; padding:2px 0; user-select:none; }
+    .arr-h { color:#64748b; font-size:14px; padding:0 6px; }
+
+    .n {
+      border-radius:10px; border:2px solid; padding:10px 16px; text-align:center;
+      font-size:0.88rem; color:#1e293b; max-width:520px; width:100%; line-height:1.45;
+    }
+    .n small { display:block; color:#64748b; font-size:0.78rem; margin-top:4px; }
+    .n.start { background:var(--start); border-color:var(--start-b); }
+    .n.dec  { background:var(--dec); border-color:var(--dec-b); font-weight:600; }
+    .n.act  { background:var(--act); border-color:var(--act-b); }
+    .n.tag  { background:var(--tag); border-color:var(--tag-b); font-weight:600; }
+    .n.hold { background:var(--hold); border-color:var(--hold-b); font-weight:600; }
+    .n.end  { background:var(--start); border-color:var(--start-b); }
+
+    .split { display:grid; grid-template-columns:1fr 1fr; gap:16px; width:100%; max-width:720px; margin:4px 0; }
+    .split3 { grid-template-columns:1fr 1fr 1fr; max-width:900px; }
+    .arm { display:flex; flex-direction:column; align-items:center; gap:0; min-width:0; }
+    .arm-label {
+      font-size:0.78rem; font-weight:700; color:#94a3b8; background:var(--card);
+      border:1px solid var(--border); border-radius:999px; padding:2px 10px; margin-bottom:4px;
+    }
+    .arm-label.yes { color:#22c55e; border-color:#166534; }
+    .arm-label.no  { color:#f87171; border-color:#991b1b; }
+
+    .subflow {
+      width:100%; max-width:720px; background:var(--card); border:1px solid var(--border);
+      border-radius:12px; padding:14px 16px; margin:8px 0;
+    }
+    .subflow-title { font-size:0.82rem; color:var(--accent); font-weight:700; margin-bottom:10px; }
+    .steps { list-style:none; padding:0; margin:0; }
+    .steps li {
+      position:relative; padding:8px 0 8px 28px; border-left:2px solid var(--border);
+      margin-left:8px; font-size:0.86rem; color:#d0d9e6;
+    }
+    .steps li:last-child { border-left-color:transparent; }
+    .steps li::before {
+      content:''; position:absolute; left:-7px; top:12px; width:12px; height:12px;
+      border-radius:50%; background:var(--accent); border:2px solid var(--bg);
+    }
+    .steps li.fail::before { background:#ef4444; }
+    .steps li.ok::before { background:#22c55e; }
+    .steps li .cond { color:#fbbf24; font-weight:600; }
+
+    table { width:100%; border-collapse:collapse; margin:10px 0; font-size:0.85rem; }
+    th,td { border:1px solid var(--border); padding:7px 10px; text-align:left; color:#d0d9e6; }
+    th { background:var(--card); color:var(--accent); }
+    .toc { background:var(--card); border-radius:10px; padding:12px 16px; margin:16px 0; font-size:0.88rem; }
+    .toc a { color:var(--accent); text-decoration:none; }
+    .toc li { margin:4px 0; color:var(--muted); }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Shadow 双策略完整流程图</h1>
+<p class="sub">对应 <code>scripts/shadow_dual_strategies.py</code> · 纯 HTML/CSS，浏览器打开即可，无需联网</p>
+
+<div class="note">
+  <strong>「每 4 秒 tick」是什么意思？</strong><br>
+  主循环每 <code>SHADOW_DUAL_POLL_SEC=4</code> 秒醒一次：拉 Gamma 当前 5m 市场 → 拉 YES/NO 订单簿 → 各调用一次 <code>strat_a_tick</code> 和 <code>strat_b_tick</code> → 休眠 4 秒。<br>
+  <strong>不是</strong> 市场只有 4 秒；一轮 BTC 5m 约 300 秒，期间大约执行 <strong>75 次 tick</strong>（每 tick 最多各下一笔模拟单）。
+</div>
+
+<div class="toc">
+  <strong style="color:var(--accent)">目录</strong>
+  <ol>
+    <li><a href="#main">主循环（共用）</a></li>
+    <li><a href="#buy">成交模拟 buy / walk_ask_fill（共用）</a></li>
+    <li><a href="#hedge">对冲 try_hedge_light（A/B 共用）</a></li>
+    <li><a href="#a-mid">策略 A — 中场完整流程</a></li>
+    <li><a href="#a-end">策略 A — 尾盘完整流程</a></li>
+    <li><a href="#b-mid">策略 B — 中场完整流程</a></li>
+    <li><a href="#b-entry">策略 B — b_entry_allowed 细则</a></li>
+    <li><a href="#b-end">策略 B — 尾盘完整流程</a></li>
+    <li><a href="#b-batch">策略 B — 分批对冲 b_gradual_hedge_batch</a></li>
+    <li><a href="#settle">轮末结算 settle_round</a></li>
+  </ol>
+</div>
+
+<!-- ==================== MAIN LOOP ==================== -->
+<h2 id="main">1. 主循环（共用）</h2>
+<div class="flow">
+  <div class="n start">启动 shadow_dual_strategies.py<br><small>A=$1000 · B=$1000 · 独立账本</small></div>
+  <div class="arr">↓</div>
+  <div class="n dec">到达运行时长？<small>如 9h=32400s</small></div>
+  <div class="split">
+    <div class="arm"><div class="arm-label yes">是</div><div class="n end">停止 · 结算最后一轮 · 退出</div></div>
+    <div class="arm"><div class="arm-label no">否</div>
+      <div class="arr">↓</div>
+      <div class="n act">probe_btc_5m() 找当前 5m slug<br><small>失败 → sleep 4s → 回到循环顶</small></div>
+    </div>
+  </div>
+  <div class="arr">↓</div>
+  <div class="n act">fetch_ask_ladder(YES) + fetch_ask_ladder(NO)<br><small>得到 best_ask、多档深度</small></div>
+  <div class="arr">↓</div>
+  <div class="n dec">slug 切换？<small>新 5 分钟轮开始</small></div>
+  <div class="split">
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="n tag">settle_round(A) + settle_round(B)<br><small>上一轮滑结算 PnL · 写 CSV</small></div>
+      <div class="arr">↓</div>
+      <div class="n act">重置 A/B 仓位 · B.endgame_heavy_was_winning=false</div>
+    </div>
+    <div class="arm"><div class="arm-label no">否</div><div class="n act" style="opacity:.7">保持当前仓位</div></div>
+  </div>
+  <div class="arr">↓</div>
+  <div class="n dec">YES/NO ask 都 &gt; 0？</div>
+  <div class="split">
+    <div class="arm"><div class="arm-label no">否</div><div class="n act">sleep 4s</div></div>
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="arr">↓</div>
+      <div class="n dec">secs_left &gt; 10？</div>
+      <div class="split">
+        <div class="arm"><div class="arm-label yes">是</div><div class="n tag">strat_a_tick + strat_b_tick</div></div>
+        <div class="arm"><div class="arm-label no">否</div><div class="n tag">仍 tick（最后 10s 内）<br><small>或 secs_left≤0 → settle 并清空 slug</small></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="arr">↓</div>
+  <div class="n start">sleep 4 秒 → 下一 tick</div>
+</div>
+
+<!-- ==================== BUY ==================== -->
+<h2 id="buy">2. 成交模拟 buy / walk_ask_fill（共用）</h2>
+<div class="subflow">
+  <div class="subflow-title">每次 BUY 都走订单簿，不是固定 best ask 满批成交</div>
+  <ol class="steps">
+    <li class="ok">输入：想买的份数 want_shares、该边 ask ladder</li>
+    <li><span class="cond">walk_ask_fill</span>：从 best ask 往上逐档吃，每档量 × BOOK_TAKE_RATIO</li>
+    <li>可选滑点：成交价 × (1 + SLIPPAGE_PCT)</li>
+    <li class="fail">深度不够 → 部分成交，日志 <code>fill 8/20sh</code> 或 <code>NO-FILL 吃不满</code></li>
+    <li>扫多档 → 日志 <code>slip avg=… best=…</code></li>
+    <li class="fail">成交额 &lt; $1 或超预算 → 放弃</li>
+    <li class="ok">更新 yes_sh / no_sh / cost / spent / fees</li>
+  </ol>
+</div>
+
+<!-- ==================== HEDGE ==================== -->
+<h2 id="hedge">3. 对冲 try_hedge_light（A/B 共用）</h2>
+<div class="subflow">
+  <div class="subflow-title">买轻边（份数少的那边），缩小 gap</div>
+  <ol class="steps">
+    <li class="fail">无重边 或 gap=0 → 返回 false</li>
+    <li class="fail">轻边 ask &gt; max_light_ask → 返回 false<br><small>A 正常对冲不限价；A-endgame 限 0.85</small></li>
+    <li>fill = min(max_fill, gap)</li>
+    <li class="fail">边际 combined = 重边均价 + 轻边 ask &gt; max_combined → false</li>
+    <li class="fail">projected combined（整批买完后）&gt; max_combined → false</li>
+    <li>若 require_economics → 调用 hedge_economics，不值得 → SKIP-HEDGE</li>
+    <li class="fail">现金不够（可用 emergency 额度）→ 缩小 fill 或 false</li>
+    <li class="ok">buy(轻边) via walk_ask_fill</li>
+  </ol>
+</div>
+
+<!-- ==================== A MID ==================== -->
+<h2 id="a-mid">4. 策略 A — 中场完整流程</h2>
+<p class="sub">条件：secs_left &gt; 60 · 函数 strat_a_tick</p>
+<div class="flow">
+  <div class="n start">strat_a_tick 入口<small>预算 $1000 · reserve $200 · gap_cap 200</small></div>
+  <div class="arr">↓</div>
+  <div class="n dec">已有 YES 或 NO 仓位？</div>
+  <div class="split">
+    <div class="arm"><div class="arm-label no">否</div><div class="arr">↓</div><div class="n act" style="opacity:.6">跳过 A-hedge</div></div>
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="arr">↓</div>
+      <div class="n dec">有重边 且 gap ≥ 5？</div>
+      <div class="split">
+        <div class="arm"><div class="arm-label no">否</div></div>
+        <div class="arm"><div class="arm-label yes">是</div>
+          <div class="arr">↓</div>
+          <div class="n dec">重边均价 + 轻边 ask ≤ 0.95？</div>
+          <div class="split">
+            <div class="arm"><div class="arm-label yes">是</div>
+              <div class="n tag">A-hedge<br><small>try_hedge_light · max_combined=0.95 · 批≤20</small></div>
+            </div>
+            <div class="arm"><div class="arm-label no">否</div><div class="n act" style="opacity:.6">暂不对冲</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="arr">↓</div>
+  <div class="n dec">YES ask≤0.45 或 NO ask≤0.45？<small>CHEAP_MAX</small></div>
+  <div class="split">
+    <div class="arm"><div class="arm-label no">否</div><div class="n end">本 tick 结束（A 不买）</div></div>
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="arr">↓</div>
+      <div class="n dec">已花费 ≥ $800？<small>deployable = 1000−200</small></div>
+      <div class="split">
+        <div class="arm"><div class="arm-label yes">是</div><div class="n end">本 tick 结束</div></div>
+        <div class="arm"><div class="arm-label no">否</div>
+          <div class="arr">↓</div>
+          <div class="n act">选 ask 更低的一边</div>
+          <div class="arr">↓</div>
+          <div class="n act">dynamic_batch：批≤20 · 受现金约束</div>
+          <div class="arr">↓</div>
+          <div class="n act">a_max_entry_shares：保证 gap≤200<br>
+            <small>重边已满200→不加；轻边可减 gap；首笔≤200</small></div>
+          <div class="arr">↓</div>
+          <div class="n dec">本批金额 ≥ $1？</div>
+          <div class="split">
+            <div class="arm"><div class="arm-label no">否</div><div class="n end">结束</div></div>
+            <div class="arm"><div class="arm-label yes">是</div>
+              <div class="n tag">A-cheap-leg · buy 扫簿</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3 id="a-end">5. 策略 A — 尾盘完整流程</h3>
+<p class="sub">条件：secs_left ≤ 60 · 只做对冲，不再 A-cheap-leg</p>
+<div class="flow">
+  <div class="n start">A 尾盘模式</div>
+  <div class="arr">↓</div>
+  <div class="n dec">gap ≥ 10？<small>BATCH_A×0.5</small></div>
+  <div class="split">
+    <div class="arm"><div class="arm-label no">否</div><div class="n end">本 tick 结束</div></div>
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="arr">↓</div>
+      <div class="n tag">A-endgame-hedge<br>
+        <small>try_hedge_light · 填 gap · combined≤0.95 · 轻边≤0.85 · emergency=reserve×50%</small></div>
+      <div class="arr">↓</div>
+      <div class="n dec">剩余 ≤ 30s 且 gap ≥ 10？</div>
+      <div class="split">
+        <div class="arm"><div class="arm-label no">否</div><div class="n end">结束</div></div>
+        <div class="arm"><div class="arm-label yes">是</div>
+          <div class="n tag">A-late-balance<br>
+            <small>批≤40 · combined≤0.98 · require_economics · emergency=全部 reserve</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== B MID ==================== -->
+<h2 id="b-mid">6. 策略 B — 中场完整流程</h2>
+<p class="sub">条件：secs_left &gt; 60 · 函数 strat_b_tick · 每 tick 依次尝试 YES、NO 各一次</p>
+<div class="flow">
+  <div class="n start">strat_b_tick 入口</div>
+  <div class="arr">↓</div>
+  <div class="n dec">剩余 ≤ 60s？</div>
+  <div class="split">
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="n act">→ 跳转「B 尾盘流程」<small>见第 8 节</small></div>
+    </div>
+    <div class="arm"><div class="arm-label no">否</div>
+      <div class="arr">↓</div>
+      <div class="n start">循环：先 YES 再 NO</div>
+    </div>
+  </div>
+  <div class="arr">↓</div>
+  <div class="n dec">该边 ask ≤ 0.89？<small>MM_MAX_BUY</small></div>
+  <div class="split">
+    <div class="arm"><div class="arm-label no">否</div><div class="n act">跳过该边 → 下一腿</div></div>
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="arr">↓</div>
+      <div class="n dec">b_entry_allowed？<small>详见第 7 节</small></div>
+    </div>
+  </div>
+  <div class="split">
+    <div class="arm"><div class="arm-label no">否</div><div class="n act">跳过 → 下一腿</div></div>
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="arr">↓</div>
+      <div class="n dec">cash_left ≥ $1？</div>
+    </div>
+  </div>
+  <div class="split">
+    <div class="arm"><div class="arm-label no">否</div><div class="n act">跳过 → 下一腿</div></div>
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="arr">↓</div>
+      <div class="n act">dynamic_batch · 批≤20</div>
+      <div class="arr">↓</div>
+      <div class="n dec">本批金额 ≥ $1？</div>
+    </div>
+  </div>
+  <div class="split">
+    <div class="arm"><div class="arm-label no">否</div><div class="n act">跳过 → 下一腿</div></div>
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="arr">↓</div>
+      <div class="n dec">已有 matched 且 projected combined &gt; 0.95？</div>
+    </div>
+  </div>
+  <div class="split">
+    <div class="arm"><div class="arm-label yes">是</div><div class="n act">跳过 → 下一腿</div></div>
+    <div class="arm"><div class="arm-label no">否</div>
+      <div class="n tag">B-mm-dca · buy 扫簿</div>
+      <div class="arr">↓</div>
+      <div class="n act">处理下一腿 YES/NO</div>
+    </div>
+  </div>
+</div>
+
+<h3 id="b-entry">7. 策略 B — b_entry_allowed 细则</h3>
+<table>
+  <tr><th>#</th><th>条件</th><th>不允许买</th></tr>
+  <tr><td>1</td><td>尚无双边仓，YES ask+NO ask &gt; 0.97</td><td>更贵的那边</td></tr>
+  <tr><td>2</td><td>双边都有，combined &gt; 0.95</td><td>ask ≥ 0.45 的边（只允许便宜稀释）</td></tr>
+  <tr><td>3</td><td>双边都有，combined 在 0.92~0.95</td><td>ask ≥ 0.50 的边</td></tr>
+  <tr><td>4</td><td>只有 YES 仓</td><td>若 YES均价 + NO ask &gt; 0.95 → 不买 NO</td></tr>
+  <tr><td>5</td><td>只有 NO 仓</td><td>若 NO均价 + YES ask &gt; 0.95 → 不买 YES</td></tr>
+  <tr><td>6</td><td>已有 matched，combined ≤ 0.93</td><td>ask &gt; 0.55 的边</td></tr>
+</table>
+
+<!-- ==================== B ENDGAME ==================== -->
+<h2 id="b-end">8. 策略 B — 尾盘完整流程</h2>
+<p class="sub">secs_left ≤ 60 · strat_b_endgame_hedge · 前提 gap≥5 且有重边</p>
+<div class="flow">
+  <div class="n start">B 尾盘 · 看重边当前 ask</div>
+  <div class="arr">↓</div>
+  <div class="n dec">重边 ask &gt; 0.90？</div>
+  <div class="split">
+    <div class="arm"><div class="arm-label yes">是</div>
+      <div class="n hold">HOLD · 标记 was_winning<br><small>不对冲，等价格跌下来</small></div>
+    </div>
+    <div class="arm"><div class="arm-label no">否</div>
+      <div class="arr">↓</div>
+      <div class="n dec">重边 ask ≤ 0.25？<small>便宜敞口</small></div>
+    </div>
+  </div>
+  <div class="split">
+    <div class="arm"></div>
+    <div class="arm">
+      <div class="split">
+        <div class="arm"><div class="arm-label yes">是</div>
+          <div class="n tag">GRADUAL-HEDGE<br><small>→ b_gradual_hedge_batch</small></div>
+        </div>
+        <div class="arm"><div class="arm-label no">否</div>
+          <div class="arr">↓</div>
+          <div class="n dec">曾 &gt;0.9 且现已跌下？<small>DYNAMIC</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="split">
+    <div class="arm"></div>
+    <div class="arm">
+      <div class="split">
+        <div class="arm"><div class="arm-label yes">是</div>
+          <div class="n dec">marg ≤ 0.98？</div>
+          <div class="split">
+            <div class="arm"><div class="arm-label yes">是</div><div class="n tag">DYNAMIC-HEDGE → batch</div></div>
+            <div class="arm"><div class="arm-label no">否</div><div class="n end">不动</div></div>
+          </div>
+        </div>
+        <div class="arm"><div class="arm-label no">否</div>
+          <div class="arr">↓</div>
+          <div class="n dec">重边均价 + 轻边 ask ≤ 0.95？</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="split">
+    <div class="arm"></div>
+    <div class="arm">
+      <div class="split">
+        <div class="arm"><div class="arm-label yes">是</div><div class="n tag">B-marginal-ok → batch</div></div>
+        <div class="arm"><div class="arm-label no">否</div>
+          <div class="arr">↓</div>
+          <div class="n dec">最后 15s · gap≥50 · marg≤0.98？</div>
+          <div class="split">
+            <div class="arm"><div class="arm-label yes">是</div><div class="n tag">B-late-large-gap → batch</div></div>
+            <div class="arm"><div class="arm-label no">否</div><div class="n end">本 tick 不动</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3 id="b-batch">9. 策略 B — 分批对冲 b_gradual_hedge_batch</h3>
+<div class="subflow">
+  <ol class="steps">
+    <li>fill = dynamic_batch(cash, light_ask, gap) · gap≥50 时 ×0.75</li>
+    <li class="fail">projected combined &gt; 0.98 → 每次减 5 份直到 ≤0.98 或放弃</li>
+    <li>若 gap≥50 或 重边均价≤0.30 → 跑 ECON（hedge_economics）</li>
+    <li class="fail">ECON worth=false → 跳过本批</li>
+    <li class="ok">try_hedge_light · max_combined=0.98 · 只对冲一批（不一次填平 gap）</li>
+  </ol>
+</div>
+<table>
+  <tr><th>ECON 条件</th><th>对冲？</th></tr>
+  <tr><td>combined &gt; 0.98</td><td>否</td></tr>
+  <tr><td>锁利 &gt; $0.05</td><td>是</td></tr>
+  <tr><td>gap≥50 + 便宜敞口，对冲亏 ≤ 裸亏×25%</td><td>是</td></tr>
+  <tr><td>gap≥50 + 小亏可接受</td><td>是</td></tr>
+  <tr><td>gap&lt;50 + 亏不多且 combined≤0.98</td><td>是</td></tr>
+  <tr><td>否则</td><td>SKIP</td></tr>
+</table>
+
+<!-- ==================== SETTLE ==================== -->
+<h2 id="settle">10. 轮末结算 settle_round</h2>
+<div class="flow">
+  <div class="n start">slug 结束或切换</div>
+  <div class="arr">↓</div>
+  <div class="n dec">yes_ask ≥ no_ask 且 yes_ask &gt; 0.55？</div>
+  <div class="split">
+    <div class="arm"><div class="arm-label yes">是</div><div class="n act">YES 结算 $1/份 · NO 结算 $0</div></div>
+    <div class="arm"><div class="arm-label no">否</div><div class="n act">NO 结算 $1/份 · YES 结算 $0</div></div>
+  </div>
+  <div class="arr">↓</div>
+  <div class="n act">PnL = proceeds − (yes_cost + no_cost + fees)<br><small>写 shadow_dual_a.csv / shadow_dual_b.csv · cum_pnl 累加 · 仓位清零</small></div>
+</div>
+
+<h2>A vs B 一览</h2>
+<table>
+  <tr><th></th><th>A cheap_sweep</th><th>B mm_dca</th></tr>
+  <tr><td>tick 频率</td><td colspan="2">共用主循环，每 4 秒各执行 1 次</td></tr>
+  <tr><td>中场入场</td><td>ask ≤ 0.45</td><td>ask ≤ 0.89 + b_entry_allowed</td></tr>
+  <tr><td>gap</td><td>硬顶 200 份</td><td>无硬顶</td></tr>
+  <tr><td>预算</td><td>$800 可用 + $200 reserve</td><td>$1000 全可用</td></tr>
+  <tr><td>对冲目标</td><td>≤0.95（尾盘可 0.98）</td><td>中场 ≤0.95；尾盘 batch ≤0.98</td></tr>
+  <tr><td>尾盘特色</td><td>强制对冲</td><td>赢边&gt;0.9 HOLD · 便宜≤0.25 分批 · 跌落后 DYNAMIC</td></tr>
+</table>
+
+<p class="sub" style="margin-top:32px">文件：<code>docs/shadow_dual_strategies_flow.html</code> · 请重新 Download 到本机覆盖旧版</p>
+
+</div>
+</body>
+</html>

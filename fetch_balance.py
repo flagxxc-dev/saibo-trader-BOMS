@@ -144,6 +144,19 @@ def fetch_positions_value(user: str) -> tuple[float, int]:
 
 def fetch_balance_detail() -> dict[str, float | int | str]:
     load_dotenv()
+    # Shadow observation: simulate sizing budget from real CLOB signals (no real orders).
+    dry = _strip_env(os.getenv("LIVE_LIH_DRY_RUN", "")).lower() in ("1", "true", "yes", "on")
+    sim = float(_strip_env(os.getenv("LIH_SHADOW_SIM_BALANCE_USDC", "0")) or 0)
+    if dry and sim > 0:
+        return {
+            "funder": _strip_env(os.getenv("POLYMARKET_FUNDER", "")),
+            "cash": sim,
+            "positions": 0.0,
+            "position_count": 0,
+            "total": sim,
+            "source": "shadow_sim",
+        }
+
     funder = resolve_funder()
     signer = _strip_env(os.getenv("POLYMARKET_SIGNER", "")) or funder
     pk = _strip_env(os.getenv("POLYMARKET_PRIVATE_KEY", ""))
