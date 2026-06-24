@@ -60,29 +60,6 @@ services:
       bot:
         condition: service_healthy
 
-  # Optional: docker compose --profile mirror up -d mirror
-  mirror:
-    profiles: ["mirror"]
-    image: polymarket-cpp-bot:latest
-    container_name: polymarket-cpp-mirror
-    restart: unless-stopped
-    entrypoint: ["python3", "scripts/mirror_server_live.py"]
-    depends_on:
-      bot:
-        condition: service_healthy
-    volumes:
-      - ./.deploy.local:/app/.deploy.local:ro
-      - ./logs:/app/logs
-    environment:
-      LOCAL_MIRROR_URL: http://bot:8081/api/mirror
-      SERVER_SSH_HOST: 70.34.221.132
-      MIRROR_POLL_SEC: "5"
-      HTTP_PROXY: ""
-      HTTPS_PROXY: ""
-      http_proxy: ""
-      https_proxy: ""
-      NO_PROXY: "bot,localhost,127.0.0.1"
-
 volumes:
   frontend-db:
     external: true

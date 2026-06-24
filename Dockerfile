@@ -51,8 +51,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY dashboard_bridge.py bot_config.py derive_and_update_keys.py derive_keys.py fetch_balance.py redeem_positions.py cli_dashboard.py test_auth.py live_preflight.py polymarket_fees.py start_bot.py status_bot.py ./
-COPY scripts/mirror_server_live.py ./scripts/mirror_server_live.py
+COPY dashboard_bridge.py bot_config.py derive_and_update_keys.py fetch_balance.py redeem_positions.py cli_dashboard.py live_preflight.py polymarket_fees.py start_bot.py status_bot.py ./
 COPY --from=cpp-builder /src/trading-core/build/trading-core ./build/trading-core
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh \

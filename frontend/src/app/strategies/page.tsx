@@ -493,7 +493,7 @@ export default function StrategiesPage() {
                 镜像资产：{live.mirrorAssetCount} {live.lihUseMirror ? "（mirror 优先）" : "（CLOB 订单簿）"}
               </p>
               <p className="text-white/35">
-                本地 mirror：<code className="text-white/50">python scripts/mirror_server_live.py</code>
+                Shadow 双策略：<code className="text-white/50">scripts/shadow_dual_run.sh</code>
               </p>
             </div>
 

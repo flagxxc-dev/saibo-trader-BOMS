@@ -84,7 +84,7 @@ AUTO_REDEEM=true            # 见第 4 节 gas 说明
 期望:`Verdict: CONFIG LOOKS OK`,且钱包模式识别为 `PROXY (signature_type=1)`、`Private key derives EOA` 与 SIGNER 一致。
 
 > 已知误报:`check_wallet_config.py` 的链上余额检查可能显示 `$0`(它走的公共 RPC 不可靠且不查 pUSD 全部形态)。**以下一步的 `fetch_balance.py` 为准**,那才是 bot 实盘真正调用的脚本。
-> 已知 bug:`test_auth.py` 当前因 `ClobClient` 构造参数过时而报错,与凭据无关,可忽略。
+> 鉴权验证：运行 <code>python derive_and_update_keys.py</code> 与 <code>python live_preflight.py</code>。
 
 ---
 
@@ -189,7 +189,7 @@ LIVE_LIH_DRY_RUN=
 | 启动即 FATAL `requires a valid POLYMARKET_PRIVATE_KEY` | 私钥还是占位符,或格式不对(需 0x+64 hex) |
 | `./build.sh` 报 permission denied (126) | 用 `bash build.sh` |
 | `check_wallet_config.py` 报余额 $0 但网页有钱 | 该脚本 RPC 检查不可靠;以 `fetch_balance.py` 为准 |
-| `test_auth.py` 报 `missing 1 required positional argument` | 脚本自身 bug,忽略;派生成功即代表鉴权可用 |
+| 派生/预检失败 | 检查 `.env` 私钥与 funder；运行 `derive_and_update_keys.py` |
 | 下单报 `order_version_mismatch` | neg-risk 市场用错 verifying contract(代码已处理,出现则提 issue) |
 | `REDEEM FAIL` | EOA 无 POL gas / RPC 超时 / 市场未 finalize / 代理账户赎回限制 → 网页手动 Claim |
 | DH 一直不开仓 | 正常:需 YES+NO ≤ `DH_SUM_TARGET` 且折价覆盖手续费,行情平静时一天可能没几单;另查冷却期、同资产已有持仓、剩余时间 < 60s |

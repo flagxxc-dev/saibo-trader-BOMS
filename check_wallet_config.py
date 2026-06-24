@@ -160,7 +160,7 @@ def main():
     if issues:
         print("Verdict: NOT READY FOR LIVE")
     else:
-        print("Verdict: CONFIG LOOKS OK — run: python test_auth.py")
+        print("Verdict: CONFIG LOOKS OK — run: python derive_and_update_keys.py && python live_preflight.py")
 
 
 if __name__ == "__main__":

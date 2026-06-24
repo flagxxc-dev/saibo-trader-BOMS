@@ -10,7 +10,7 @@ A Polymarket arbitrage bot trading binary "Up or Down" markets (BTC/ETH/SOL/XRP,
 2. **Python glue at repo root** — `dashboard_bridge.py` (WS server), `cli_dashboard.py` (Rich terminal UI), plus helper scripts the C++ core shells out to.
 3. **`frontend/`** — Next.js 16 web dashboard (Prisma + SQLite, NextAuth, Tailwind 4).
 
-The active strategy is **Leg-In Hedge (LIH)**: buy the cheap leg first, then rebalance / hedge to target combined price (`LIH_TARGET_COMBINED`, default 0.95). **Dump Hedge (DH)** is archived under `archive/dh-only/` — set `LIH_ENABLED=false` to restore DH-only mode. Latency arb was removed; see root `README.md` for current architecture (not `SPECS.md`).
+The active strategy is **Leg-In Hedge (LIH)**: buy the cheap leg first, then rebalance / hedge to target combined price (`LIH_TARGET_COMBINED`, default 0.95). **Dump Hedge (DH)** is archived under `archive/dh-only/` — set `LIH_ENABLED=false` to restore DH-only mode. See root `README.md` for current architecture.
 
 ## Commands
 
@@ -34,7 +34,7 @@ docker compose up -d --build
 docker compose restart bot      # after .env changes
 ```
 
-There is no test suite. `test_auth.py`, `test_json.py`, `test_sandbox.py` are ad-hoc manual scripts.
+There is no test suite. Use `live_preflight.py` and `derive_and_update_keys.py` for manual checks.
 
 ## Architecture
 
@@ -46,7 +46,7 @@ trading-core (C++) ──stdout JSON lines──> dashboard_bridge.py ──ws:/
 ```
 
 - The core prints its full state as single-line JSON to **stdout**; logs go to stderr. The bridge spawns the core as a subprocess, captures stdout, and broadcasts each JSON line to all WebSocket clients. Anything printed to stdout that isn't `{...}` JSON breaks nothing but is treated as a log line — keep stdout JSON-clean when editing the core.
-- Design rule from SPECS.md: the C++ core is never exposed to the internet; the frontend only observes via the bridge.
+- The C++ core is never exposed to the internet; the frontend only observes via the bridge.
 
 ### C++ core (`trading-core/src/`)
 
@@ -77,5 +77,5 @@ Everything is driven by the root `.env` (see `.env.example`) and `web.env` for t
 
 - `README.md` — current architecture, LIH flow, ops commands
 - `deploy/README.md` — Docker single/multi-instance and bare-metal systemd (Chinese)
-- `SPECS.md` — **deprecated** early design draft (latency arb, Redis/Postgres); do not use for implementation
+- `docs/LIH_VERSION.md` — LIH version notes
 - `deploy/LIVE_READINESS.md`, `manual.md` — operations notes
